@@ -1,0 +1,9 @@
+# Name,   Type, SubType, Offset,   Size
+# Dual-OTA layout: two 4MB app slots (active + staging) so a firmware update can
+# roll back if the new image is bad. Content lives on the SD card, so the app is
+# only ~2.2MB — 4MB slots leave generous headroom. otadata tracks the boot slot.
+nvs,      data, nvs,      0x9000,   0x6000,
+otadata,  data, ota,      0xf000,   0x2000,
+phy_init, data, phy,      0x11000,  0x1000,
+ota_0,    app,  ota_0,    0x20000,  0x400000,
+ota_1,    app,  ota_1,    0x420000, 0x400000,
