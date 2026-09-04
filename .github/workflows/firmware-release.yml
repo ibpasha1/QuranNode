@@ -48,12 +48,15 @@ jobs:
       - name: Generate embedded assets (no-SD fallback)
         run: python3 tools/gen_embedded.py
 
-      - name: Build firmware (version = the git tag)
-        working-directory: firmware
+      - name: Stamp FW_VERSION with the git tag
         env:
-          # Overrides the FW_VERSION in platformio.ini so the built image knows
-          # its own version — the device compares this to version.txt to auto-update.
-          PLATFORMIO_BUILD_FLAGS: '-DFW_VERSION="${{ github.ref_name }}"'
+          TAG: ${{ github.ref_name }}
+        run: |
+          sed -i "s/-DFW_VERSION=\"[^\"]*\"/-DFW_VERSION=\"${TAG}\"/" firmware/platformio.ini
+          grep FW_VERSION firmware/platformio.ini
+
+      - name: Build firmware
+        working-directory: firmware
         run: pio run -e devkit_st7796s
 
       - name: Write version.txt (the device polls this to detect updates)
