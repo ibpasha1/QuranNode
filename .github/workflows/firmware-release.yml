@@ -1,0 +1,61 @@
+name: Build & publish firmware
+
+# Push a version tag (e.g. `git tag v0.6.1 && git push origin v0.6.1`) and this
+# builds firmware.bin and publishes a GitHub Release with it attached. Devices
+# then pull releases/latest/download/firmware.bin via Settings > Update firmware.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create the release
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Write Wi-Fi secrets from repo secrets
+        env:
+          WIFI_SSID: ${{ secrets.WIFI_SSID }}
+          WIFI_PASS: ${{ secrets.WIFI_PASS }}
+        run: |
+          cat > firmware/secrets.ini <<EOF
+          [secrets]
+          wifi =
+              '-DWIFI_SSID="${WIFI_SSID}"'
+              '-DWIFI_PASS="${WIFI_PASS}"'
+          EOF
+
+      - name: Generate embedded assets (no-SD fallback)
+        run: python3 tools/gen_embedded.py
+
+      - name: Build firmware
+        working-directory: firmware
+        run: pio run -e devkit_st7796s
+
+      - name: Publish release with firmware.bin
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: firmware/.pio/build/devkit_st7796s/firmware.bin

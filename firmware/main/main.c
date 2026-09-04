@@ -28,7 +28,7 @@ static const char *TAG = "QURANNODE";
 // Bump this string to prove an OTA landed: the new value appears in the boot log
 // after the device reboots into the freshly-flashed slot.
 #ifndef FW_VERSION
-#define FW_VERSION "dev6-github"
+#define FW_VERSION "v0.6.1"
 #endif
 
 #define QN_TASK_STACK 40960   // Arabic render + minimp3 decode headroom
