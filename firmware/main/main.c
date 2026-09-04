@@ -33,6 +33,16 @@ static const char *TAG = "QURANNODE";
 
 #define QN_TASK_STACK 40960   // Arabic render + minimp3 decode headroom
 
+// Full-screen one-line status (used for boot update + recovery), drawn directly
+// so it works before/without the app/scene system.
+static void draw_status(Canvas *c, const char *title, const char *msg)
+{
+    theme_clear(c);
+    theme_header(c, title, THEME_TITLE, NULL, THEME_DIM);
+    font_draw_string_centered(c, 200, &font_small, msg, THEME_LABEL);
+    hal_display_push(c->buf);
+}
+
 static void qn_task(void *arg)
 {
     (void)arg;
@@ -63,6 +73,16 @@ static void qn_task(void *arg)
             hal_display_push(canvas.buf);
             vTaskDelay(pdMS_TO_TICKS(200));
         }
+    }
+
+    // Auto-update: check GitHub for a newer release and install it before the app
+    // starts. Skips instantly if Wi-Fi is unavailable or already up to date.
+    draw_status(&canvas, "QuranNode", "Checking for updates...");
+    if (hal_ota_boot_check()) {
+        draw_status(&canvas, "Firmware Update", "Installing update...");
+        hal_ota_apply();   // downloads + flashes + reboots on success
+        draw_status(&canvas, "Firmware Update", "Update failed - starting");
+        vTaskDelay(pdMS_TO_TICKS(1500));
     }
 
     app_init();

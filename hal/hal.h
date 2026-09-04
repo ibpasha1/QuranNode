@@ -82,6 +82,13 @@ const char *hal_ota_url(void);
 void        hal_ota_pull(void);
 const char *hal_ota_status(void);
 
+// Boot-time auto-update: connect Wi-Fi and compare the latest release version to
+// this build. Returns true (Wi-Fi left up) if an update is available — the caller
+// then shows a screen and calls hal_ota_apply(). Returns false (Wi-Fi down) if up
+// to date or offline. hal_ota_apply() downloads+flashes+reboots (blocking).
+bool        hal_ota_boot_check(void);
+void        hal_ota_apply(void);
+
 // True if the user is holding the recovery combo at boot (5-way center). Lets a
 // sealed unit force Wi-Fi update mode even if the normal UI is broken.
 bool        hal_recovery_requested(void);

@@ -243,6 +243,8 @@ void hal_ota_start(void) { s_sim_ota = true; printf("[sim] OTA update mode (no-o
 const char *hal_ota_url(void) { return s_sim_ota ? "http://192.168.86.20/" : NULL; }
 void hal_ota_pull(void) { s_sim_ota = true; printf("[sim] OTA pull from GitHub (no-op)\n"); }
 const char *hal_ota_status(void) { return s_sim_ota ? "Downloading update..." : NULL; }
+bool hal_ota_boot_check(void) { return false; }   // no auto-update in the sim
+void hal_ota_apply(void) { printf("[sim] OTA apply (no-op)\n"); }
 bool hal_recovery_requested(void) { return false; }
 
 // Audio (hal_audio_*) lives in hal/sim/audio_sim.cpp — dr_mp3 decode + SoundTouch

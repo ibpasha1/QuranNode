@@ -28,7 +28,11 @@
 #ifndef OTA_REPO
 #define OTA_REPO "OWNER/REPO"
 #endif
-#define OTA_FW_URL "https://github.com/" OTA_REPO "/releases/latest/download/firmware.bin"
+#ifndef FW_VERSION
+#define FW_VERSION "dev"
+#endif
+#define OTA_FW_URL  "https://github.com/" OTA_REPO "/releases/latest/download/firmware.bin"
+#define OTA_VER_URL "https://github.com/" OTA_REPO "/releases/latest/download/version.txt"
 
 static const char *TAG = "OTA";
 
@@ -117,31 +121,41 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+// Bring up Wi-Fi STA (once) and wait up to timeout_ms for an IP. Idempotent —
+// safe to call from both the boot update-check and the manual update path.
+static bool s_wifi_inited = false;
+static bool wifi_up(int timeout_ms)
+{
+    if (!s_wifi_inited) {
+        esp_netif_init();
+        esp_event_loop_create_default();
+        esp_netif_create_default_wifi_sta();
+        wifi_init_config_t wc = WIFI_INIT_CONFIG_DEFAULT();
+        esp_wifi_init(&wc);
+        esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi, NULL, NULL);
+        esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi, NULL, NULL);
+        wifi_config_t cfg = {0};
+        strncpy((char *)cfg.sta.ssid, WIFI_SSID, sizeof(cfg.sta.ssid) - 1);
+        strncpy((char *)cfg.sta.password, WIFI_PASS, sizeof(cfg.sta.password) - 1);
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_set_config(WIFI_IF_STA, &cfg);
+        s_wifi_inited = true;
+    }
+    esp_wifi_start();
+    esp_wifi_set_ps(WIFI_PS_NONE);   // radio always-on (modem-sleep drops HTTP under load)
+    ESP_LOGW(TAG, "connecting to Wi-Fi \"%s\"…", WIFI_SSID);
+    for (int i = 0; i < timeout_ms / 100 && !s_ip[0]; i++) vTaskDelay(pdMS_TO_TICKS(100));
+    return s_ip[0] != 0;
+}
+
+static void wifi_down(void) { esp_wifi_stop(); s_ip[0] = '\0'; }
+
 bool ota_start(void)
 {
     if (s_started) { ESP_LOGI(TAG, "OTA mode already active (ip=%s)", s_ip[0] ? s_ip : "connecting"); return true; }
     s_started = true;
 
-    // NVS is already initialised by the HAL. Bring up the network stack.
-    esp_netif_init();
-    esp_event_loop_create_default();
-    esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t wc = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&wc);
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi, NULL, NULL);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi, NULL, NULL);
-
-    wifi_config_t cfg = {0};
-    strncpy((char *)cfg.sta.ssid, WIFI_SSID, sizeof(cfg.sta.ssid) - 1);
-    strncpy((char *)cfg.sta.password, WIFI_PASS, sizeof(cfg.sta.password) - 1);
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &cfg);
-    esp_wifi_start();
-    // Keep the radio always-on during updates. With modem-sleep (the default) the
-    // device has an IP but drops pings/HTTP because the render loop keeps the CPU
-    // busy between beacons — it looks "unreachable" from the same subnet.
-    esp_wifi_set_ps(WIFI_PS_NONE);
+    wifi_up(15000);   // event-driven; the local upload server also works once up
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size = 8192;
@@ -154,8 +168,6 @@ bool ota_start(void)
     } else {
         ESP_LOGE(TAG, "http server failed to start");
     }
-
-    ESP_LOGW(TAG, "OTA update mode — connecting to Wi-Fi \"%s\"…", WIFI_SSID);
     return true;
 }
 
@@ -169,12 +181,10 @@ static char s_status[64];
 const char *hal_ota_status(void) { return s_status[0] ? s_status : NULL; }
 static void set_status(const char *s) { snprintf(s_status, sizeof(s_status), "%s", s); }
 
-static void pull_task(void *arg)
+// Download the latest firmware.bin from GitHub and flash it (blocking). Reboots
+// on success; sets a status string and returns on failure.
+void hal_ota_apply(void)
 {
-    (void)arg;
-    for (int i = 0; i < 200 && !s_ip[0]; i++) vTaskDelay(pdMS_TO_TICKS(100));  // await IP
-    if (!s_ip[0]) { set_status("Wi-Fi failed"); vTaskDelete(NULL); return; }
-
     set_status("Downloading update...");
     ESP_LOGW(TAG, "pull: %s", OTA_FW_URL);
     esp_http_client_config_t http = {
@@ -194,6 +204,14 @@ static void pull_task(void *arg)
         ESP_LOGE(TAG, "pull OTA failed: %s", esp_err_to_name(r));
         set_status("Update failed");
     }
+}
+
+static void pull_task(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 200 && !s_ip[0]; i++) vTaskDelay(pdMS_TO_TICKS(100));  // await IP
+    if (!s_ip[0]) { set_status("Wi-Fi failed"); vTaskDelete(NULL); return; }
+    hal_ota_apply();   // reboots on success; sets status on failure
     vTaskDelete(NULL);
 }
 
@@ -202,6 +220,56 @@ void hal_ota_pull(void)
     set_status("Connecting to Wi-Fi...");
     ota_start();   // Wi-Fi STA + local /update server (fallback for a same-network push)
     xTaskCreate(pull_task, "ota_pull", 8192, NULL, 5, NULL);
+}
+
+// --- Boot-time auto-update: fetch the latest version tag and compare ------
+typedef struct { char *buf; int len, cap; } TextBuf;
+static esp_err_t ver_evt(esp_http_client_event_t *e)
+{
+    if (e->event_id == HTTP_EVENT_ON_DATA && e->user_data) {
+        TextBuf *t = (TextBuf *)e->user_data;
+        int n = e->data_len;
+        if (n > t->cap - 1 - t->len) n = t->cap - 1 - t->len;
+        if (n > 0) { memcpy(t->buf + t->len, e->data, n); t->len += n; t->buf[t->len] = '\0'; }
+    }
+    return ESP_OK;
+}
+
+static bool http_get_text(const char *url, char *out, int cap)
+{
+    TextBuf t = { out, 0, cap };
+    out[0] = '\0';
+    esp_http_client_config_t c = {
+        .url = url, .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 10000, .event_handler = ver_evt, .user_data = &t,
+    };
+    esp_http_client_handle_t h = esp_http_client_init(&c);
+    esp_err_t e = esp_http_client_perform(h);   // follows the GitHub redirect
+    int sc = esp_http_client_get_status_code(h);
+    esp_http_client_cleanup(h);
+    return e == ESP_OK && sc == 200 && t.len > 0;
+}
+
+// Connect Wi-Fi, compare the latest release's version.txt to this build's
+// FW_VERSION. Returns true (Wi-Fi left up) if a different version is available;
+// otherwise tears Wi-Fi back down and returns false. Called once at boot.
+bool hal_ota_boot_check(void)
+{
+    if (!wifi_up(6000)) { wifi_down(); return false; }   // no Wi-Fi → just boot
+
+    char latest[48];
+    if (!http_get_text(OTA_VER_URL, latest, sizeof(latest))) {
+        ESP_LOGW(TAG, "version check failed — skipping");
+        wifi_down();
+        return false;
+    }
+    for (int i = (int)strlen(latest) - 1; i >= 0 &&
+         (latest[i] == '\n' || latest[i] == '\r' || latest[i] == ' ' || latest[i] == '\t'); i--)
+        latest[i] = '\0';
+
+    ESP_LOGW(TAG, "auto-update: installed=%s latest=%s", FW_VERSION, latest);
+    if (strcmp(latest, FW_VERSION) == 0) { wifi_down(); return false; }  // up to date
+    return true;   // newer/different available — leave Wi-Fi up for hal_ota_apply()
 }
 
 const char *hal_ota_url(void)

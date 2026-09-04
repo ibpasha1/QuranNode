@@ -48,14 +48,23 @@ jobs:
       - name: Generate embedded assets (no-SD fallback)
         run: python3 tools/gen_embedded.py
 
-      - name: Build firmware
+      - name: Build firmware (version = the git tag)
         working-directory: firmware
+        env:
+          # Overrides the FW_VERSION in platformio.ini so the built image knows
+          # its own version — the device compares this to version.txt to auto-update.
+          PLATFORMIO_BUILD_FLAGS: '-DFW_VERSION="${{ github.ref_name }}"'
         run: pio run -e devkit_st7796s
 
-      - name: Publish release with firmware.bin
+      - name: Write version.txt (the device polls this to detect updates)
+        run: echo -n "${{ github.ref_name }}" > version.txt
+
+      - name: Publish release with firmware.bin + version.txt
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           generate_release_notes: true
-          files: firmware/.pio/build/devkit_st7796s/firmware.bin
+          files: |
+            firmware/.pio/build/devkit_st7796s/firmware.bin
+            version.txt

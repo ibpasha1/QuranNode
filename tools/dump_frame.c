@@ -98,6 +98,8 @@ void hal_ota_start(void){ s_dump_ota = true; }
 const char *hal_ota_url(void){ return s_dump_ota ? "http://192.168.86.20/" : NULL; }
 void hal_ota_pull(void){ s_dump_ota = true; }
 const char *hal_ota_status(void){ return s_dump_ota ? "Downloading update..." : NULL; }
+bool hal_ota_boot_check(void){ return false; }
+void hal_ota_apply(void){}
 bool hal_recovery_requested(void){ return false; }
 // Called by the driver between ticks to advance the virtual playhead.
 static void aud_advance(uint32_t dt_ms){ if (s_aud_playing) s_aud_pos += (double)dt_ms * s_aud_rate; }
