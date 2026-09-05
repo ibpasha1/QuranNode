@@ -62,6 +62,23 @@ static int  s_sel_word;         // selected word in review (reading order)
 static uint32_t s_seg_stop_ms;  // stop teacher playback at this clip pos (0=off)
 static float s_level;           // live mic level 0..1 (recite view meter)
 
+// Voice-activity endpointing: the recording auto-starts (right after LISTEN)
+// and auto-finishes, so the user just recites and pauses — no button needed.
+// The analyzed audio is trimmed to [s_voice_a, s_voice_b): without the trim,
+// the silent lead-in (while the user draws breath) aligns to the first word
+// and scores it "not heard" — the V1 field bug.
+#define VOICE_PEAK      1100      // s16 peak that counts as voice (~0.034 fs)
+#define VOICE_PREROLL   (MIC_HZ / 4)          // keep 250ms before first voice
+#define VOICE_TAILPAD   (MIC_HZ / 3)          // keep 330ms after last voice
+#define AUTO_STOP_MS    1600      // this much silence after voice = done
+#define NO_VOICE_MS     12000     // never heard anything = give up
+static bool     s_heard;          // any voice yet this take
+static uint32_t s_voice_a, s_voice_b;   // first/last voiced sample bounds
+static uint32_t s_sil_ms;         // silence since the last voiced chunk
+static uint32_t s_wait_ms;        // total time waiting with no voice at all
+static uint32_t s_rec_off_ms;     // trim offset (maps analysis times -> s_rec)
+static const char *s_ready_hint;  // one-shot status line on the READY view
+
 static void load_ayah(int surah, int ayah)
 {
     if (s_clip) { hal_audio_close(s_clip); s_clip = NULL; }
@@ -123,12 +140,22 @@ static void start_recite(void)
     if (!hal_mic_start(MIC_HZ)) { s_state = TEA_NO_MIC; return; }
     s_rec_n = 0;
     s_level = 0;
+    s_heard = false;
+    s_voice_a = s_voice_b = 0;
+    s_sil_ms = s_wait_ms = 0;
+    s_ready_hint = NULL;
+    hal_audio_click(true);   // audible "your turn" cue
     s_state = TEA_RECITE;
 }
 
 static void finish_recite(void)
 {
     hal_mic_stop();
+    if (!s_heard) {          // nothing to analyze — back to the prompt
+        s_ready_hint = "Didn't hear you - try again";
+        s_state = TEA_READY;
+        return;
+    }
     s_state = TEA_ANALYZE;   // next tick runs the analysis
 }
 
@@ -145,9 +172,16 @@ static void run_analysis(void)
     for (int i = 0; i < s_nwords; i++)
         timing_word(&s_timing, s_ayah, i, &wt[i]);
 
-    bool ok = s_ref_n && s_rec_n &&
+    // Analyze only the voiced span (plus a little tail) — leading silence
+    // otherwise aligns to the first words and marks them "not heard".
+    uint32_t a = s_voice_a, b = s_voice_b + VOICE_TAILPAD;
+    if (b > s_rec_n) b = s_rec_n;
+    if (a >= b) { a = 0; b = s_rec_n; }
+    s_rec_off_ms = a * 1000u / MIC_HZ;
+
+    bool ok = s_ref_n && b > a &&
               recite_analyze(s_ref, s_ref_n, s_ref_hz,
-                             s_rec, s_rec_n, MIC_HZ,
+                             s_rec + a, b - a, MIC_HZ,
                              wt, s_nwords, s_words);
     if (!ok)
         for (int i = 0; i < s_nwords; i++)
@@ -177,8 +211,9 @@ static void play_user_word(void)
     const ReciteWord *w = &s_words[s_sel_word];
     if (w->user_end_ms <= w->user_start_ms) return;
     hal_audio_pause(s_clip);
-    uint32_t a = w->user_start_ms * (MIC_HZ / 1000);
-    uint32_t b = w->user_end_ms * (MIC_HZ / 1000);
+    // Analysis times are relative to the trimmed take; map into s_rec.
+    uint32_t a = (w->user_start_ms + s_rec_off_ms) * (MIC_HZ / 1000);
+    uint32_t b = (w->user_end_ms + s_rec_off_ms) * (MIC_HZ / 1000);
     if (b > s_rec_n) b = s_rec_n;
     if (a >= b) return;
     hal_pcm_play(s_rec + a, b - a, MIC_HZ);
@@ -194,7 +229,7 @@ static void on_tick(uint32_t dt_ms)
     case TEA_RECITE: {
         int got = hal_mic_read(s_rec + s_rec_n, (int)(REC_MAX_N - s_rec_n));
         if (got > 0) {
-            // Live level for the meter (peak of this chunk, decayed).
+            // Peak of this chunk: drives the meter and the voice endpointer.
             int peak = 0;
             for (int i = 0; i < got; i++) {
                 int v = s_rec[s_rec_n + i];
@@ -203,8 +238,28 @@ static void on_tick(uint32_t dt_ms)
             }
             float lv = (float)peak / 32768.f;
             s_level = lv > s_level ? lv : s_level * 0.85f;
+
+            uint32_t chunk_ms = (uint32_t)got * 1000u / MIC_HZ;
+            if (peak >= VOICE_PEAK) {
+                if (!s_heard) {
+                    s_heard = true;
+                    s_voice_a = s_rec_n > VOICE_PREROLL ? s_rec_n - VOICE_PREROLL : 0;
+                }
+                s_voice_b = s_rec_n + (uint32_t)got;
+                s_sil_ms = 0;
+            } else if (s_heard) {
+                s_sil_ms += chunk_ms;
+            } else {
+                s_wait_ms += chunk_ms;
+            }
+
             s_rec_n += (uint32_t)got;
-            if (s_rec_n >= REC_MAX_N) finish_recite();   // hit the cap
+            // Fluid flow: recited then paused -> analyze automatically;
+            // never spoke at all -> give up back to the prompt.
+            if ((s_heard && s_sil_ms >= AUTO_STOP_MS) ||
+                (!s_heard && s_wait_ms >= NO_VOICE_MS) ||
+                s_rec_n >= REC_MAX_N)
+                finish_recite();
         }
         break;
     }
@@ -304,8 +359,9 @@ static void on_render(Canvas *c)
                                   listening ? THEME_ACTIVE : THEME_TITLE);
         font_draw_string_centered(c, iy + 26, &font_tiny,
                                   listening ? "recite it back when the teacher finishes"
-                                            : "the teacher recites, then you repeat",
-                                  THEME_DIM);
+                                  : s_ready_hint ? s_ready_hint
+                                                 : "the teacher recites, then you repeat",
+                                  !listening && s_ready_hint ? THEME_BADGE : THEME_DIM);
         if (listening) {
             uint32_t pos = hal_audio_pos_ms(s_clip), len = hal_audio_len_ms(s_clip);
             canvas_progress_bar(c, 40, iy + 40, CANVAS_WIDTH - 80, 4,
@@ -318,9 +374,14 @@ static void on_render(Canvas *c)
     case TEA_RECITE: {
         draw_ayah_marked(c, band_top, band_bot, false);
         int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 52;
-        font_draw_string_centered(c, iy, &font_medium, "RECITE", THEME_BADGE);
+        // The endpointer drives the flow: recite, pause, it analyzes itself.
+        font_draw_string_centered(c, iy, &font_medium,
+                                  s_heard ? "HEARING YOU" : "RECITE",
+                                  s_heard ? THEME_ACTIVE : THEME_BADGE);
         font_draw_string_centered(c, iy + 26, &font_tiny,
-                                  "press OK when you finish", THEME_DIM);
+                                  s_heard ? "pause when you finish - I'll notice"
+                                          : "go ahead - I'm listening",
+                                  THEME_DIM);
         // Live mic meter.
         theme_meter(c, 40, iy + 38, CANVAS_WIDTH - 80, 8, s_level);
         break;
@@ -383,7 +444,7 @@ static void on_render(Canvas *c)
     }
     case TEA_RECITE: {
         KeyChip k[2] = {
-            { "OK", "DONE", 3, { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
+            { "OK", "DONE NOW", 3, { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
             { "BK", "CANCEL", 1, { INPUT_BTN_BACK } },
         };
         theme_keybar(c, k, 2);

@@ -12,11 +12,14 @@
 
 // Feature distance thresholds on z-normalized features (empirical; identical
 // audio scores ~0). Deliberately generous — V1 flags, it doesn't grade.
-#define TH_GOOD    0.9f
-#define TH_UNSURE  1.6f
-// A user span whose pre-normalization energy is this far under the utterance
-// median counts as silence -> the word is "missing".
+#define TH_GOOD    1.0f
+#define TH_UNSURE  1.8f
+// Silence floor: this far under the voiced level counts as "no voice there".
+// Anchored to BOTH the median and the peak — median alone collapses when the
+// take is mostly silence (median = the silence itself), peak alone is fooled
+// by one loud plosive. Speech sits within ~25dB of its own peak.
 #define SILENCE_DB 18.0f
+#define PEAK_RANGE_DB 25.0f
 
 typedef struct { float f[N_FEAT]; float raw_db; } Frame;
 
@@ -51,16 +54,35 @@ static int extract(const int16_t *pcm, uint32_t n, uint32_t hz, Frame *out)
 
 // Z-normalize each feature dim over the utterance: cancels mic gain, overall
 // voice brightness, and level differences between the reference and the user.
-static void znorm(Frame *fr, int n)
+// Stats come from VOICED frames only — silence log-energy is an extreme
+// outlier (~-100dB) that would skew mean/std by how much silence each side
+// happens to contain, making identical voice score as different. Values are
+// clamped to +/-4 sigma so residual silence frames stay bounded outliers.
+static void znorm(Frame *fr, int n, float floor_db)
 {
     for (int d = 0; d < N_FEAT; d++) {
         double mu = 0, sd = 0;
-        for (int i = 0; i < n; i++) mu += fr[i].f[d];
-        mu /= n;
-        for (int i = 0; i < n; i++) { double v = fr[i].f[d] - mu; sd += v * v; }
-        sd = sqrt(sd / n);
+        int nv = 0;
+        for (int i = 0; i < n; i++)
+            if (fr[i].raw_db > floor_db) { mu += fr[i].f[d]; nv++; }
+        if (nv < 4) {   // almost nothing voiced: fall back to all frames
+            mu = 0; nv = n;
+            for (int i = 0; i < n; i++) mu += fr[i].f[d];
+        }
+        mu /= nv;
+        int ns = 0;
+        for (int i = 0; i < n; i++) {
+            if (nv < n && fr[i].raw_db <= floor_db) continue;
+            double v = fr[i].f[d] - mu;
+            sd += v * v; ns++;
+        }
+        sd = sqrt(sd / (ns > 0 ? ns : 1));
         if (sd < 1e-6) sd = 1e-6;
-        for (int i = 0; i < n; i++) fr[i].f[d] = (float)((fr[i].f[d] - mu) / sd);
+        for (int i = 0; i < n; i++) {
+            float z = (float)((fr[i].f[d] - mu) / sd);
+            if (z > 4.f) z = 4.f; else if (z < -4.f) z = -4.f;
+            fr[i].f[d] = z;
+        }
     }
 }
 
@@ -100,9 +122,16 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
     int rn = extract(ref, ref_n, ref_hz, rf);
     int un = extract(usr, usr_n, usr_hz, uf);
     if (rn < 2 || un < 2) { free(rf); return false; }
-    float usr_floor = median_db(uf, un) - SILENCE_DB;
-    znorm(rf, rn);
-    znorm(uf, un);
+    float usr_peak = uf[0].raw_db, ref_peak = rf[0].raw_db;
+    for (int i = 1; i < un; i++)
+        if (uf[i].raw_db > usr_peak) usr_peak = uf[i].raw_db;
+    for (int i = 1; i < rn; i++)
+        if (rf[i].raw_db > ref_peak) ref_peak = rf[i].raw_db;
+    float floor_med = median_db(uf, un) - SILENCE_DB;
+    float floor_peak = usr_peak - PEAK_RANGE_DB;
+    float usr_floor = floor_med > floor_peak ? floor_med : floor_peak;
+    znorm(rf, rn, ref_peak - PEAK_RANGE_DB);
+    znorm(uf, un, usr_floor);
 
     // DTW: cost[i][j] = best path cost aligning ref[0..i] with usr[0..j].
     // Full matrix of costs + backpointers (coarse frames keep it ~700KB max,
