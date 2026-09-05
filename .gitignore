@@ -31,3 +31,6 @@ sdcard/state/
 
 # OS cruft
 .DS_Store
+
+# Third-party tajweed classifier clone (used only by shape_quran.py)
+tools/quran-tajweed/
