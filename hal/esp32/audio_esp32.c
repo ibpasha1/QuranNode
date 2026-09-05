@@ -225,14 +225,58 @@ void hal_audio_set_output(int speaker) {
 // stream (needs a tiny mixer stage in the render task; avoid amp pops).
 void hal_audio_click(bool accent) { (void)accent; }
 
-// --- Quran Teacher audio (not yet on device) -------------------------------
-// Mic capture needs an I2S mic (e.g. INMP441) that this board doesn't have
-// wired yet; PCM readback needs a decode-to-PSRAM path (we stream-decode).
-// All stubbed so the core compiles; the teacher scene shows "mic not
-// available" when hal_mic_start() fails.
-bool hal_mic_start(uint32_t hz) { (void)hz; return false; }
-int  hal_mic_read(int16_t *buf, int max_samples) { (void)buf; (void)max_samples; return -1; }
-void hal_mic_stop(void) {}
+// --- INMP441 I2S microphone (I2S_NUM_1) — Quran Teacher recording ----------
+static i2s_chan_handle_t s_rx;
+static bool s_mic_ok;
+
+bool hal_mic_start(uint32_t hz)
+{
+    if (s_mic_ok) return true;
+    i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+    if (i2s_new_channel(&cc, NULL, &s_rx) != ESP_OK) { s_rx = NULL; return false; }
+    // INMP441 is 24-bit data left-justified in a 32-bit slot; L/R->GND = left.
+    i2s_std_config_t sc = {
+        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(hz),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = { .mclk = I2S_GPIO_UNUSED, .bclk = PIN_MIC_SCK, .ws = PIN_MIC_WS,
+                      .dout = I2S_GPIO_UNUSED, .din = PIN_MIC_SD },
+    };
+    sc.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    if (i2s_channel_init_std_mode(s_rx, &sc) != ESP_OK ||
+        i2s_channel_enable(s_rx) != ESP_OK) {
+        i2s_del_channel(s_rx); s_rx = NULL; return false;
+    }
+    s_mic_ok = true;
+    ESP_LOGI(TAG, "INMP441 mic started %uHz (SCK%d WS%d SD%d)",
+             (unsigned)hz, PIN_MIC_SCK, PIN_MIC_WS, PIN_MIC_SD);
+    return true;
+}
+
+int hal_mic_read(int16_t *buf, int max_samples)
+{
+    if (!s_mic_ok) return -1;
+    static int32_t raw[512];
+    int want = max_samples < 512 ? max_samples : 512;
+    size_t got = 0;
+    if (i2s_channel_read(s_rx, raw, (size_t)want * sizeof(int32_t), &got, 0) != ESP_OK)
+        return 0;   // nothing ready yet
+    int n = (int)(got / sizeof(int32_t));
+    for (int i = 0; i < n; i++)
+        buf[i] = (int16_t)(raw[i] >> 13);   // 24-bit MSB-aligned -> int16 + gain (tune >>11..16)
+    return n;
+}
+
+void hal_mic_stop(void)
+{
+    if (!s_mic_ok) return;
+    i2s_channel_disable(s_rx);
+    i2s_del_channel(s_rx);
+    s_rx = NULL; s_mic_ok = false;
+}
+
+// --- Reference recitation PCM readback (still TODO on device) --------------
+// The teacher's alignment/compare needs the reference ayah decoded to PCM at a
+// given offset. Not yet implemented (streaming decoder is playback-oriented).
 uint32_t hal_audio_read_pcm16(HalAudioClip *clip, uint32_t start_ms,
                               int16_t *out, uint32_t max_samples, uint32_t *out_hz)
 { (void)clip; (void)start_ms; (void)out; (void)max_samples; if (out_hz) *out_hz = 0; return 0; }
