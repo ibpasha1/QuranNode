@@ -62,8 +62,16 @@ static const NavKey NAV_KEYS[] = {
 };
 #define NAV_N ((int)(sizeof(NAV_KEYS) / sizeof(NAV_KEYS[0])))
 #define LONG_PRESS_MS 500
+// Hold-to-scroll: after holding a direction REPEAT_DELAY_MS, auto-repeat starting
+// at REPEAT_START_MS and accelerating to REPEAT_MIN_MS (fast-scroll long lists).
+#define REPEAT_DELAY_MS 350
+#define REPEAT_START_MS 180
+#define REPEAT_MIN_MS    40
 
 static bool s_nav_down[NAV_N];       // debounced pressed state
+static uint32_t s_nav_t0[NAV_N];     // press time (auto-repeat delay)
+static uint32_t s_nav_last[NAV_N];   // last repeat emitted
+static int      s_nav_reps[NAV_N];   // repeats this hold (acceleration)
 static bool s_center_down;
 static uint32_t s_center_t0;
 static bool s_center_long_sent;
@@ -86,14 +94,24 @@ static void input_init(void)
 // Poll the switch; emit at most one event per call (queued in *out).
 static bool poll_nav(InputEvent *out)
 {
-    // Directional keys: emit on press edge.
+    // Directional keys: emit on press edge, then auto-repeat while held.
     for (int i = 0; i < NAV_N; i++) {
         if (NAV_KEYS[i].pin < 0) continue;
         bool down = gpio_get_level(NAV_KEYS[i].pin) == 0;
-        if (down && !s_nav_down[i]) {
-            s_nav_down[i] = true;
+        uint32_t now = plat_millis();
+        if (down && !s_nav_down[i]) {                 // press edge
+            s_nav_down[i] = true; s_nav_t0[i] = now; s_nav_last[i] = now; s_nav_reps[i] = 0;
             out->type = NAV_KEYS[i].ev; out->encoder_id = ENC_NAV; out->pressed = true;
             return true;
+        }
+        if (down && s_nav_down[i] && now - s_nav_t0[i] >= REPEAT_DELAY_MS) {   // auto-repeat
+            uint32_t iv = REPEAT_START_MS - (uint32_t)s_nav_reps[i] * 12;
+            if (iv < REPEAT_MIN_MS) iv = REPEAT_MIN_MS;
+            if (now - s_nav_last[i] >= iv) {
+                s_nav_last[i] = now; s_nav_reps[i]++;
+                out->type = NAV_KEYS[i].ev; out->encoder_id = ENC_NAV; out->pressed = true;
+                return true;
+            }
         }
         if (!down) s_nav_down[i] = false;
     }
@@ -221,10 +239,12 @@ bool qn_hal_init(void)
                       "(SPI3 MOSI2/CLK42/MISO41/CS1)", esp_err_to_name(sdret));
     } else {
         ESP_LOGI(TAG, "SD mounted at /sdcard");
-        ESP_LOGI(TAG, "  packs/reader_lg.qgp : %s",
-                 hal_fs_exists("packs/reader_lg.qgp") ? "FOUND" : "MISSING (copy repo sdcard/ to card)");
-        ESP_LOGI(TAG, "  audio/abdulbasit/1/1.mp3 : %s",
-                 hal_fs_exists("audio/abdulbasit/1/1.mp3") ? "FOUND" : "MISSING");
+        ESP_LOGI(TAG, "  packs/reader_lg/1.qgp : %s",
+                 hal_fs_exists("packs/reader_lg/1.qgp") ? "FOUND" : "MISSING (copy repo sdcard/ to card)");
+        ESP_LOGI(TAG, "  packs/reader_lg/78.qgp (Juz Amma) : %s",
+                 hal_fs_exists("packs/reader_lg/78.qgp") ? "FOUND" : "MISSING");
+        ESP_LOGI(TAG, "  audio/abdulbasit/78/1.mp3 : %s",
+                 hal_fs_exists("audio/abdulbasit/78/1.mp3") ? "FOUND" : "MISSING");
     }
 
     if (display_mgr_init() != ESP_OK) {

@@ -66,7 +66,19 @@ static void audio_task(void *arg)
         bool play = s_playing;
         xSemaphoreGive(s_mtx);
 
-        if (!(s_i2s_ok && play && c)) { vTaskDelay(pdMS_TO_TICKS(8)); continue; }
+        if (!(s_i2s_ok && play && c)) {
+            // Not playing (paused / clip closed / between surahs): keep feeding the
+            // I2S DMA with SILENCE. Otherwise the DMA loops the last buffer of PCM
+            // and you hear a buzzy glitch on pause and when leaving the reader.
+            if (s_i2s_ok) {
+                static const int16_t silence[256] = {0};   // ~1.5ms stereo @44.1k
+                size_t wr;
+                i2s_channel_write(s_tx, silence, sizeof(silence), &wr, pdMS_TO_TICKS(20));
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(8));
+            }
+            continue;
+        }
         if (c->rd_pos >= c->mp3_len) {   // reached the end
             s_playing = false; spk(false);
             continue;
