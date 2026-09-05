@@ -192,6 +192,10 @@ void hal_ota_apply(void)
         .crt_bundle_attach = esp_crt_bundle_attach,   // Mozilla roots (covers GitHub)
         .timeout_ms = 20000,
         .keep_alive_enable = true,
+        // GitHub's CDN (objects.githubusercontent.com) sends large response
+        // headers; the default 512B buffer overflows ("HTTP_CLIENT: Out of buffer").
+        .buffer_size = 4096,
+        .buffer_size_tx = 2048,
     };
     esp_https_ota_config_t cfg = { .http_config = &http };
     esp_err_t r = esp_https_ota(&cfg);
@@ -242,6 +246,7 @@ static bool http_get_text(const char *url, char *out, int cap)
     esp_http_client_config_t c = {
         .url = url, .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 10000, .event_handler = ver_evt, .user_data = &t,
+        .buffer_size = 4096, .buffer_size_tx = 2048,   // GitHub CDN has big headers
     };
     esp_http_client_handle_t h = esp_http_client_init(&c);
     esp_err_t e = esp_http_client_perform(h);   // follows the GitHub redirect
