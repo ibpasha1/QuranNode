@@ -90,8 +90,11 @@ def process_surah(surah):
         except subprocess.CalledProcessError as e:
             print(f"  !! slice failed {surah}:{ayah} — skipping ({e})")
             continue   # keep the .qtm consistent with the mp3s that exist
-        # Word timings, normalized to ayah start.
-        words = [(int(s0 - base), int(s1 - base)) for (_wn, s0, s1) in vt["segments"]]
+        # Word timings, normalized to ayah start. Segments are usually
+        # [word_no, start_ms, end_ms] but some come back [start_ms, end_ms] — take
+        # the last two as start/end either way.
+        words = [(int(seg[-2] - base), int(seg[-1] - base))
+                 for seg in vt.get("segments", []) if len(seg) >= 2]
         ayat.append((ayah, words))
         print(f"  {surah}:{ayah}  {end-base}ms  {len(words)} words")
 
@@ -111,7 +114,10 @@ def main():
     os.makedirs(CACHE, exist_ok=True)
     for surah in SAMPLE:
         print(f"surah {surah} reciter={RECITER_DIR}")
-        process_surah(surah)
+        try:
+            process_surah(surah)
+        except Exception as e:
+            print(f"  !! surah {surah} failed: {e} — skipping")
 
 
 if __name__ == "__main__":
