@@ -7,8 +7,13 @@
 // 100ms frames: coarse enough that a full DTW matrix for a ~20s ayah is small
 // (~200x300 floats), fine enough to resolve word spans (words run 300ms+).
 #define FRAME_MS   100
-#define N_FEAT     3        // log-RMS, zero-crossing rate, spectral tilt
+#define N_FEAT     6        // log-RMS, ZCR, tilt + 3 spectral band ratios
 #define MAX_FRAMES 600      // 60s cap per side
+
+// Band centers for the spectral features (Goertzel single-bin energies,
+// expressed relative to total frame energy so they capture timbre, not
+// level). Chosen for voice: F0/low harmonics, mid formants, upper formants.
+static const float BAND_HZ[3] = { 300.f, 900.f, 2200.f };
 
 // Feature distance thresholds on z-normalized features (empirical; identical
 // audio scores ~0). Deliberately generous — V1 flags, it doesn't grade.
@@ -19,7 +24,7 @@
 // take is mostly silence (median = the silence itself), peak alone is fooled
 // by one loud plosive. Speech sits within ~25dB of its own peak.
 #define SILENCE_DB 18.0f
-#define PEAK_RANGE_DB 25.0f
+#define PEAK_RANGE_DB 30.0f
 
 typedef struct { float f[N_FEAT]; float raw_db; } Frame;
 
@@ -48,6 +53,20 @@ static int extract(const int16_t *pcm, uint32_t n, uint32_t hz, Frame *out)
         out[i].f[0] = out[i].raw_db;
         out[i].f[1] = (float)zc / (float)flen;             // pitch-ish proxy
         out[i].f[2] = (float)(10.0 * log10(ed / (e + 1e-10) + 1e-10)); // tilt
+
+        // Spectral bands (Goertzel single-bin energy at each center),
+        // relative to total energy -> timbre profile independent of level.
+        for (int b = 0; b < 3; b++) {
+            double w = 2.0 * M_PI * BAND_HZ[b] / (double)hz;
+            double coef = 2.0 * cos(w);
+            double q0, q1 = 0, q2 = 0;
+            for (uint32_t j = 0; j < flen; j++) {
+                q0 = coef * q1 - q2 + s[j] / 32768.0;
+                q2 = q1; q1 = q0;
+            }
+            double p = (q1 * q1 + q2 * q2 - coef * q1 * q2) / flen;
+            out[i].f[3 + b] = (float)(10.0 * log10(p / (e * flen + 1e-10) + 1e-10));
+        }
     }
     return nf;
 }
@@ -86,18 +105,23 @@ static void znorm(Frame *fr, int n, float floor_db)
     }
 }
 
+// Weighted distance: envelope/rate features carry the match; the spectral
+// bands refine it (they separate voice from noise/garble) but are damped so
+// legitimate voice-timbre differences don't overwhelm the rhythm agreement.
+static const float FEAT_W[N_FEAT] = { 1.f, 1.f, 1.f, 0.45f, 0.45f, 0.45f };
+
 static float fdist(const Frame *a, const Frame *b)
 {
     float s = 0;
     for (int d = 0; d < N_FEAT; d++) {
         float v = a->f[d] - b->f[d];
-        s += v * v;
+        s += FEAT_W[d] * v * v;
     }
     return sqrtf(s);
 }
 
-// Median of the raw frame energies (dB) — the utterance's "voiced" floor ref.
-static float median_db(const Frame *fr, int n)
+// Percentile of the raw frame energies (dB). p in [0,100].
+static float percentile_db(const Frame *fr, int n, int p)
 {
     float tmp[MAX_FRAMES];
     for (int i = 0; i < n; i++) tmp[i] = fr[i].raw_db;
@@ -107,7 +131,9 @@ static float median_db(const Frame *fr, int n)
         while (j >= 0 && tmp[j] > v) { tmp[j + 1] = tmp[j]; j--; }
         tmp[j + 1] = v;
     }
-    return tmp[n / 2];
+    int k = n * p / 100;
+    if (k >= n) k = n - 1;
+    return tmp[k];
 }
 
 bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
@@ -122,15 +148,12 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
     int rn = extract(ref, ref_n, ref_hz, rf);
     int un = extract(usr, usr_n, usr_hz, uf);
     if (rn < 2 || un < 2) { free(rf); return false; }
-    float usr_peak = uf[0].raw_db, ref_peak = rf[0].raw_db;
-    for (int i = 1; i < un; i++)
-        if (uf[i].raw_db > usr_peak) usr_peak = uf[i].raw_db;
-    for (int i = 1; i < rn; i++)
-        if (rf[i].raw_db > ref_peak) ref_peak = rf[i].raw_db;
-    float floor_med = median_db(uf, un) - SILENCE_DB;
-    float floor_peak = usr_peak - PEAK_RANGE_DB;
-    float usr_floor = floor_med > floor_peak ? floor_med : floor_peak;
-    znorm(rf, rn, ref_peak - PEAK_RANGE_DB);
+    // Voiced floor from the 95th-percentile level, not the max — one loud
+    // plosive would otherwise push softer (but real) words under the floor.
+    float floor_med = percentile_db(uf, un, 50) - SILENCE_DB;
+    float floor_p95 = percentile_db(uf, un, 95) - PEAK_RANGE_DB;
+    float usr_floor = floor_med > floor_p95 ? floor_med : floor_p95;
+    znorm(rf, rn, percentile_db(rf, rn, 95) - PEAK_RANGE_DB);
     znorm(uf, un, usr_floor);
 
     // DTW: cost[i][j] = best path cost aligning ref[0..i] with usr[0..j].
@@ -174,7 +197,10 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
         }
     }
 
-    // Score each reference word span.
+    // Score each reference word span. Pause frames in the user audio (a
+    // learner breathing between words) are excluded from the mean — pausing
+    // isn't a mismatch. Whether the word was voiced AT ALL is judged
+    // separately for the "missing" verdict.
     for (int w = 0; w < n_words; w++) {
         int fa = (int)(words[w].start_ms / FRAME_MS);
         int fb = (int)(words[w].end_ms / FRAME_MS);
@@ -188,6 +214,7 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
             if (lo[i] < ja) ja = lo[i];
             if (hi[i] > jb) jb = hi[i];
             for (int j = lo[i]; j <= hi[i]; j++) {
+                if (uf[j].raw_db <= usr_floor) continue;   // pause, not speech
                 sum += fdist(&rf[i], &uf[j]);
                 cnt++;
             }
@@ -200,14 +227,42 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
         o->score = cnt ? (float)(sum / cnt) : 99.f;
         o->user_start_ms = (jb >= ja) ? (uint32_t)ja * FRAME_MS : 0;
         o->user_end_ms   = (jb >= ja) ? (uint32_t)(jb + 1) * FRAME_MS : 0;
-        if (cnt == 0 || span == 0 || voiced * 2 < span)
-            o->verdict = RECITE_MISSING;
-        else if (o->score < TH_GOOD)
-            o->verdict = RECITE_GOOD;
-        else if (o->score < TH_UNSURE)
-            o->verdict = RECITE_UNSURE;
-        else
-            o->verdict = RECITE_MISMATCH;
+        // Missing = the mapped stretch is under 1/3 voice.
+        o->verdict = (cnt == 0 || span == 0 || voiced * 3 < span)
+                         ? RECITE_MISSING : RECITE_GOOD;   // grade below
+    }
+
+    // Verdicts are RELATIVE to this take: a learner's voice against a master
+    // reciter never scores near zero, so absolute thresholds would flag
+    // everything (the "always unsure" failure). Grade against the take's own
+    // LOWER-QUARTILE word score — the best-matched words set the bar, so a
+    // take that's half garbled can't drag the baseline up — with absolute
+    // floors (identical audio is always good) and ceilings (wholesale
+    // divergence can't self-normalize into a pass).
+    {
+        float sc[128];
+        int ns = 0;
+        for (int w = 0; w < n_words && ns < 128; w++)
+            if (out[w].verdict != RECITE_MISSING) sc[ns++] = out[w].score;
+        float base = 0;
+        if (ns) {
+            for (int i = 1; i < ns; i++) {   // insertion sort
+                float v = sc[i]; int j = i - 1;
+                while (j >= 0 && sc[j] > v) { sc[j + 1] = sc[j]; j--; }
+                sc[j + 1] = v;
+            }
+            base = sc[ns / 4];
+        }
+        float th_g = base * 1.30f; if (th_g < TH_GOOD) th_g = TH_GOOD;
+        float th_u = base * 1.70f; if (th_u < TH_UNSURE) th_u = TH_UNSURE;
+        if (th_g > 2.6f) th_g = 2.6f;
+        if (th_u > 3.2f) th_u = 3.2f;
+        for (int w = 0; w < n_words; w++) {
+            if (out[w].verdict == RECITE_MISSING) continue;
+            out[w].verdict = out[w].score <= th_g ? RECITE_GOOD
+                           : out[w].score <= th_u ? RECITE_UNSURE
+                                                  : RECITE_MISMATCH;
+        }
     }
 
     free(cost); free(bp); free(rf);

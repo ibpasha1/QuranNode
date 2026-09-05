@@ -67,7 +67,9 @@ static float s_level;           // live mic level 0..1 (recite view meter)
 // The analyzed audio is trimmed to [s_voice_a, s_voice_b): without the trim,
 // the silent lead-in (while the user draws breath) aligns to the first word
 // and scores it "not heard" — the V1 field bug.
-#define VOICE_PEAK      1100      // s16 peak that counts as voice (~0.034 fs)
+#define VOICE_PEAK      700       // s16 peak that counts as voice (~0.021 fs)
+                                  // low on purpose: quiet mics/AGC — the
+                                  // scorer has its own take-relative floor
 #define VOICE_PREROLL   (MIC_HZ / 4)          // keep 250ms before first voice
 #define VOICE_TAILPAD   (MIC_HZ / 3)          // keep 330ms after last voice
 #define AUTO_STOP_MS    1600      // this much silence after voice = done
