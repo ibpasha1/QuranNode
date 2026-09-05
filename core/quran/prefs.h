@@ -30,6 +30,6 @@ void prefs_save(void);    // persist current prefs
 void prefs_apply(void);   // push brightness -> HAL, rate -> shared player
 
 // The reader glyph pack path for the current font size, e.g. "packs/reader_md.qgp".
-const char *prefs_font_pack(void);
+const char *prefs_font_pack(int surah);   // per-surah pack, e.g. "packs/reader_lg/78.qgp"
 const char *prefs_font_name(void);       // "Small" ... "Huge"
 bool prefs_font_is_large(void);          // XL/XXL: reader drops prev/next context

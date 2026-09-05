@@ -21,8 +21,8 @@ OUT_H = os.path.join(DRV, "embedded_assets.h")
 # No-SD safety net only: Al-Fatihah at the default Large size (plain + tajweed)
 # plus its recitation. All other sizes/surahs live on the SD card.
 ASSETS = [
-    ("qn_pack_lg",  "packs/reader_lg.qgp"),
-    ("qn_pack_lg_tj",  "packs/reader_lg_tj.qgp"),
+    ("qn_pack_lg",  "packs/reader_lg/1.qgp"),
+    ("qn_pack_lg_tj",  "packs/reader_lg_tj/1.qgp"),
     ("qn_qtm1",  "quran/timings/1.qtm"),
     ("qn_mp3_1", "audio/abdulbasit/1/1.mp3"),
     ("qn_mp3_2", "audio/abdulbasit/1/2.mp3"),

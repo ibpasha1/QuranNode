@@ -279,8 +279,8 @@ static void sd_path(char *dst, size_t n, const char *rel)
 // No-SD safety net: just Al-Fatihah at the default Large size (plain + tajweed)
 // plus its recitation. Everything else — all sizes, all surahs — comes from SD.
 static const struct { const char *path; const uint8_t *s; const size_t *len; } EMBEDDED[] = {
-    { "packs/reader_lg.qgp",      qn_pack_lg, &qn_pack_lg_len },
-    { "packs/reader_lg_tj.qgp",   qn_pack_lg_tj, &qn_pack_lg_tj_len },
+    { "packs/reader_lg/1.qgp",    qn_pack_lg, &qn_pack_lg_len },
+    { "packs/reader_lg_tj/1.qgp", qn_pack_lg_tj, &qn_pack_lg_tj_len },
     { "quran/timings/1.qtm",      qn_qtm1,  &qn_qtm1_len },
     { "audio/abdulbasit/1/1.mp3", qn_mp3_1, &qn_mp3_1_len },
     { "audio/abdulbasit/1/2.mp3", qn_mp3_2, &qn_mp3_2_len },

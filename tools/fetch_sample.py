@@ -24,9 +24,10 @@ RECITER_ID = 2                      # AbdulBaset AbdulSamad, Murattal
 RECITER_DIR = "abdulbasit"
 QDC = "https://api.qurancdn.com/api/qdc/audio/reciters/{rid}/audio_files?chapter={ch}&segments=true"
 
-# (surah, first_ayah, last_ayah) — M1a proves the loop on Al-Fatiha; extend here
-# as more shaped text lands (Al-Mulk, Al-Kahf 1-20).
-SAMPLE = [(1, 1, 7)]
+# Surahs to fetch audio + timings for. Al-Fatihah (1) stays for the no-SD fallback;
+# Juz Amma (78-114) is the first real SD content. Each whole surah is fetched;
+# the ayah count comes from the API, so just list surah numbers.
+SAMPLE = [1] + list(range(78, 115))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUDIO_ROOT = os.path.join(ROOT, "sdcard", "audio", RECITER_DIR)
@@ -55,16 +56,18 @@ def _download(url, path):
 
 def _slice(full_mp3, start_ms, end_ms, out_mp3):
     os.makedirs(os.path.dirname(out_mp3), exist_ok=True)
-    # -ss/-to AFTER -i + re-encode => sample-accurate cut (keeps word sync tight).
+    # Stream-copy (no re-encode): -ss/-to before -i, -c copy. Avoids an
+    # ffmpeg 7.1 + libmp3lame padding bug and is fast; cuts at MP3 frame
+    # boundaries (<26 ms), which is imperceptible for recitation + word sync.
     subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-i", full_mp3,
+        ["ffmpeg", "-y", "-v", "error",
          "-ss", f"{start_ms/1000:.3f}", "-to", f"{end_ms/1000:.3f}",
-         "-c:a", "libmp3lame", "-q:a", "4", out_mp3],
+         "-i", full_mp3, "-c", "copy", out_mp3],
         check=True,
     )
 
 
-def process_surah(surah, a0, a1):
+def process_surah(surah):
     data = _get_json(QDC.format(rid=RECITER_ID, ch=surah))
     af = data["audio_files"][0]
     full_url = af["audio_url"]
@@ -72,15 +75,21 @@ def process_surah(surah, a0, a1):
     _download(full_url, full_mp3)
 
     vt_by_key = {vt["verse_key"]: vt for vt in af["verse_timings"]}
+    # Whole surah: ayah numbers from the API, in order.
+    ayah_nums = sorted(int(k.split(":")[1]) for k in vt_by_key)
 
     ayat = []   # (ayah, [(start_rel, end_rel) per word])
-    for ayah in range(a0, a1 + 1):
+    for ayah in ayah_nums:
         vt = vt_by_key[f"{surah}:{ayah}"]
         base = vt["timestamp_from"]
         end = vt["timestamp_to"]
         # Per-ayah audio, sliced from the full surah file.
         out_mp3 = os.path.join(AUDIO_ROOT, str(surah), f"{ayah}.mp3")
-        _slice(full_mp3, base, end, out_mp3)
+        try:
+            _slice(full_mp3, base, end, out_mp3)
+        except subprocess.CalledProcessError as e:
+            print(f"  !! slice failed {surah}:{ayah} — skipping ({e})")
+            continue   # keep the .qtm consistent with the mp3s that exist
         # Word timings, normalized to ayah start.
         words = [(int(s0 - base), int(s1 - base)) for (_wn, s0, s1) in vt["segments"]]
         ayat.append((ayah, words))
@@ -100,9 +109,9 @@ def process_surah(surah, a0, a1):
 
 def main():
     os.makedirs(CACHE, exist_ok=True)
-    for (surah, a0, a1) in SAMPLE:
-        print(f"surah {surah} ({a0}-{a1}) reciter={RECITER_DIR}")
-        process_surah(surah, a0, a1)
+    for surah in SAMPLE:
+        print(f"surah {surah} reciter={RECITER_DIR}")
+        process_surah(surah)
 
 
 if __name__ == "__main__":

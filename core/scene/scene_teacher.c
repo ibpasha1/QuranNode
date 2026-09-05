@@ -46,6 +46,7 @@ static int  s_surah = 1, s_ayah = 1;
 
 static GlyphPack s_pack;
 static bool s_pack_ok;
+static int  s_pack_surah = -1;   // packs are per-surah; reload when the surah changes
 static struct HalAudioClip *s_clip;
 static TimingTable s_timing;
 static bool s_timing_ok;
@@ -69,6 +70,13 @@ static void load_ayah(int surah, int ayah)
     s_surah = surah; s_ayah = ayah;
     s_rec_n = 0; s_ref_n = 0; s_nwords = 0; s_sel_word = 0; s_seg_stop_ms = 0;
 
+    // Per-surah glyph pack: (re)load when the surah changes.
+    if (!s_pack_ok || s_pack_surah != surah) {
+        if (s_pack_ok) glyphpack_close(&s_pack);
+        s_pack_ok = glyphpack_open(&s_pack, prefs_font_pack(surah));
+        s_pack_surah = surah;
+    }
+
     char path[64];
     snprintf(path, sizeof(path), "audio/%s/%d/%d.mp3", "abdulbasit", surah, ayah);
     s_clip = hal_audio_open(path);
@@ -85,7 +93,6 @@ static void on_enter(void)
 {
     if (!s_rec) s_rec = malloc(REC_MAX_N * sizeof(int16_t));
     if (!s_ref) s_ref = malloc(REF_MAX_N * sizeof(int16_t));
-    if (!s_pack_ok) s_pack_ok = glyphpack_open(&s_pack, prefs_font_pack());
     ResumePoint r = progress_has_resume() ? progress_resume()
                                           : (ResumePoint){ 1, 1, 1.0f };
     load_ayah(r.surah, r.ayah);

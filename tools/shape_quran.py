@@ -364,28 +364,52 @@ def _save_preview(preview_dir, surah, ayah, alpha, colidx, w, h, boxes):
     img.save(os.path.join(preview_dir, f"{surah}_{ayah}.png"))
 
 
+def _parse_surahs(spec):
+    """'1,78-114' -> [1, 78, 79, ... 114]."""
+    out = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-")
+            out.extend(range(int(a), int(b) + 1))
+        else:
+            out.append(int(part))
+    return out
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Shape Quran ayat into a QuranNode glyph pack")
+    ap = argparse.ArgumentParser(description="Shape Quran ayat into QuranNode per-surah glyph packs")
     ap.add_argument("--font", default=FONT_DEFAULT)
     ap.add_argument("--px", type=int, default=40, help="glyph pixel size")
     ap.add_argument("--maxw", type=int, default=300, help="text column width px (portrait=300)")
-    ap.add_argument("--out", default="sdcard/packs/reader_lg.qgp")
+    ap.add_argument("--surahs", default="1", help="which surahs, e.g. '1,78-114'")
+    ap.add_argument("--outdir", default="sdcard/packs/reader_lg",
+                    help="per-surah <n>.qgp files are written here")
     ap.add_argument("--tajweed", action="store_true", help="bake tajweed rule colors")
     ap.add_argument("--preview", metavar="DIR", help="also write per-ayah preview PNGs")
     args = ap.parse_args()
 
-    # Source text from the Tanzil file (so tajweed offsets line up); fall back to
-    # the embedded sample if it isn't present.
-    tanzil = load_tanzil_surah(1) if os.path.exists(os.path.join(TAJWEED_DIR, "quran-uthmani.txt")) else None
-    if tanzil:
-        ayat = [(1, a, tanzil[a]) for a in sorted(tanzil)]
-    else:
-        ayat = AL_FATIHA
-        tanzil = {a: t for _s, a, t in AL_FATIHA}
+    have_tanzil = os.path.exists(os.path.join(TAJWEED_DIR, "quran-uthmani.txt"))
+    os.makedirs(args.outdir, exist_ok=True)
+    surahs = _parse_surahs(args.surahs)
+    print(f"font={args.font} px={args.px} maxw={args.maxw} tajweed={args.tajweed} "
+          f"surahs={surahs[0]}..{surahs[-1]} -> {args.outdir}")
 
-    color_maps = load_color_maps(1, tanzil) if args.tajweed else None
-    print(f"font={args.font} px={args.px} maxw={args.maxw} tajweed={args.tajweed}")
-    build_pack(ayat, args.font, args.px, args.out, color_maps, args.preview, args.maxw)
+    for surah in surahs:
+        if have_tanzil:
+            tanzil = load_tanzil_surah(surah)
+            ayat = [(surah, a, tanzil[a]) for a in sorted(tanzil)]
+        elif surah == 1:
+            ayat = AL_FATIHA
+            tanzil = {a: t for _s, a, t in AL_FATIHA}
+        else:
+            print(f"  skip surah {surah}: no Tanzil text")
+            continue
+        color_maps = load_color_maps(surah, tanzil) if args.tajweed else None
+        out = os.path.join(args.outdir, f"{surah}.qgp")
+        build_pack(ayat, args.font, args.px, out, color_maps, args.preview, args.maxw)
 
 
 if __name__ == "__main__":

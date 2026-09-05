@@ -77,11 +77,11 @@ static const char *size_tag(void)
     }
 }
 
-const char *prefs_font_pack(void)
+const char *prefs_font_pack(int surah)
 {
     static char path[48];
-    snprintf(path, sizeof(path), "packs/reader_%s%s.qgp",
-             size_tag(), g_prefs.tajweed ? "_tj" : "");
+    snprintf(path, sizeof(path), "packs/reader_%s%s/%d.qgp",
+             size_tag(), g_prefs.tajweed ? "_tj" : "", surah);
     return path;
 }
 

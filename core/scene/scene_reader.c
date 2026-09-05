@@ -10,6 +10,7 @@
 #include "player.h"
 #include "progress.h"
 #include "prefs.h"
+#include "quran_db.h"
 #include "theme.h"
 #include "font.h"
 #include "canvas.h"
@@ -22,6 +23,7 @@ static GlyphPack s_pack;
 static bool   s_pack_ok = false;
 static int    s_pack_size = -1;  // font size the loaded pack was built for
 static int    s_pack_tj = -1;    // tajweed flag the loaded pack matches
+static int    s_pack_surah = -1; // surah the loaded pack is for (packs are per-surah)
 static int    s_bm_toast = 0;    // frames remaining on the "Bookmarked" confirmation
 #define s_player g_player   // the reader drives the shared transport
 
@@ -41,22 +43,19 @@ static void mmss(uint32_t ms, char *b, int n)
 static void ensure_pack(void)
 {
     if (s_pack_ok && s_pack_size == g_prefs.font_size &&
-        s_pack_tj == g_prefs.tajweed)
+        s_pack_tj == g_prefs.tajweed && s_pack_surah == s_player.surah)
         return;
     if (s_pack_ok) { glyphpack_close(&s_pack); s_pack_ok = false; }
-    s_pack_ok = glyphpack_open(&s_pack, prefs_font_pack());
+    s_pack_ok = glyphpack_open(&s_pack, prefs_font_pack(s_player.surah));
     s_pack_size = g_prefs.font_size;
     s_pack_tj = g_prefs.tajweed;
+    s_pack_surah = s_player.surah;
 }
 
 static const char *surah_name(int s)
 {
-    switch (s) {
-    case 1:  return "Al-Fatihah";
-    case 18: return "Al-Kahf";
-    case 67: return "Al-Mulk";
-    default: return "Surah";
-    }
+    const char *n = qdb_surah_name(s);
+    return (n && n[0]) ? n : "Surah";
 }
 
 static const char *reciter_name(const char *id)

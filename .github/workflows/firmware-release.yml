@@ -45,9 +45,7 @@ jobs:
               '-DWIFI_PASS="${WIFI_PASS}"'
           EOF
 
-      - name: Generate embedded assets (no-SD fallback)
-        run: python3 tools/gen_embedded.py
-
+      # The no-SD fallback (emb_*.c) is committed, so no asset generation needed here.
       - name: Stamp FW_VERSION with the git tag
         env:
           TAG: ${{ github.ref_name }}
