@@ -22,15 +22,29 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+// Streaming pack: the file is kept OPEN and only the header + index live in RAM.
+// Each looked-up ayah's blob is read on demand into a small LRU cache, so a long
+// surah's pack never has to fit in memory (the reader only needs a few ayat).
+struct HalFile;
+#define GP_CACHE_N 4        // ayah blobs kept resident (reader shows prev+cur+next)
+
 typedef struct {
-    uint8_t *data;      // whole pack file, owned (freed by glyphpack_close)
-    size_t   len;
+    int      surah, ayah;   // -1 = empty slot
+    uint8_t *blob;          // owned: one ayah's alpha[+colidx]+word-boxes
+    size_t   cap;
+    uint32_t used_at;       // LRU stamp
+} GpCacheSlot;
+
+typedef struct {
+    struct HalFile *file;   // open pack file (streamed)
     uint16_t version;
     uint16_t flags;
     uint16_t line_h;
     uint16_t ascent;
     uint32_t n_entries;
-    const uint8_t *index;   // -> index array within data
+    uint8_t *index;         // owned: n_entries * 16-byte entries
+    GpCacheSlot cache[GP_CACHE_N];
+    uint32_t clock;
 } GlyphPack;
 
 typedef struct { uint16_t x, y, w, h; } AtWordBox;
@@ -48,12 +62,14 @@ typedef struct {
 bool glyphpack_open(GlyphPack *gp, const char *rel_path);
 void glyphpack_close(GlyphPack *gp);
 
-// Look up one ayah. Returns false if not present in this pack.
-bool glyphpack_get(const GlyphPack *gp, int surah, int ayah, AyahGlyphs *out);
+// Look up one ayah (reads its blob into the cache — hence non-const). Returns
+// false if not present. The returned pointers stay valid until GP_CACHE_N other
+// ayat are fetched, so prev+cur+next coexist.
+bool glyphpack_get(GlyphPack *gp, int surah, int ayah, AyahGlyphs *out);
 
 // Sequential access over the pack's ayat (in file order = mushaf order).
 int  glyphpack_count(const GlyphPack *gp);
-bool glyphpack_at(const GlyphPack *gp, int i, AyahGlyphs *out);
+bool glyphpack_at(GlyphPack *gp, int i, AyahGlyphs *out);
 
 // Read word box i (reading order) into *out.
 bool ayah_word_box(const AyahGlyphs *g, int i, AtWordBox *out);

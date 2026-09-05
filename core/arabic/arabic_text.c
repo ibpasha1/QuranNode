@@ -16,77 +16,112 @@ static inline uint32_t rd_u32(const uint8_t *p) {
 bool glyphpack_open(GlyphPack *gp, const char *rel_path)
 {
     memset(gp, 0, sizeof(*gp));
-    if (!hal_fs_slurp(rel_path, &gp->data, &gp->len)) {
-        QN_LOGE(TAG, "pack not found: %s", rel_path);
-        return false;
-    }
-    if (gp->len < 20 || memcmp(gp->data, "QNGP", 4) != 0) {
+    for (int i = 0; i < GP_CACHE_N; i++) gp->cache[i].surah = -1;
+
+    gp->file = hal_fs_open(rel_path);
+    if (!gp->file) { QN_LOGE(TAG, "pack not found: %s", rel_path); return false; }
+
+    uint8_t hdr[20];
+    if (hal_fs_pread(gp->file, hdr, 20, 0) != 20 || memcmp(hdr, "QNGP", 4) != 0) {
         QN_LOGE(TAG, "bad pack header: %s", rel_path);
-        free(gp->data);
-        gp->data = NULL;
-        return false;
+        hal_fs_close(gp->file); gp->file = NULL; return false;
     }
-    gp->version   = rd_u16(gp->data + 4);
-    gp->flags     = rd_u16(gp->data + 6);
-    gp->line_h    = rd_u16(gp->data + 8);
-    gp->ascent    = rd_u16(gp->data + 10);
-    gp->n_entries = rd_u32(gp->data + 12);
-    uint32_t index_off = rd_u32(gp->data + 16);
-    if (index_off + (size_t)gp->n_entries * IDX_STRIDE > gp->len) {
-        QN_LOGE(TAG, "pack index out of range: %s", rel_path);
-        free(gp->data);
-        gp->data = NULL;
-        return false;
+    gp->version   = rd_u16(hdr + 4);
+    gp->flags     = rd_u16(hdr + 6);
+    gp->line_h    = rd_u16(hdr + 8);
+    gp->ascent    = rd_u16(hdr + 10);
+    gp->n_entries = rd_u32(hdr + 12);
+    uint32_t index_off = rd_u32(hdr + 16);
+
+    // Only the index lives in RAM (n_entries * 16 bytes); blobs stream on demand.
+    size_t idx_bytes = (size_t)gp->n_entries * IDX_STRIDE;
+    gp->index = malloc(idx_bytes ? idx_bytes : 1);
+    if (!gp->index ||
+        (size_t)hal_fs_pread(gp->file, gp->index, idx_bytes, index_off) != idx_bytes) {
+        QN_LOGE(TAG, "pack index read failed: %s", rel_path);
+        free(gp->index); gp->index = NULL;
+        hal_fs_close(gp->file); gp->file = NULL; return false;
     }
-    gp->index = gp->data + index_off;
-    QN_LOGI(TAG, "pack %s: %u ayat, line_h=%u", rel_path,
+    QN_LOGI(TAG, "pack %s: %u ayat, line_h=%u (streamed)", rel_path,
             (unsigned)gp->n_entries, gp->line_h);
     return true;
 }
 
 void glyphpack_close(GlyphPack *gp)
 {
-    if (gp->data) free(gp->data);
+    if (gp->file) hal_fs_close(gp->file);
+    if (gp->index) free(gp->index);
+    for (int i = 0; i < GP_CACHE_N; i++)
+        if (gp->cache[i].blob) free(gp->cache[i].blob);
     memset(gp, 0, sizeof(*gp));
 }
 
-bool glyphpack_get(const GlyphPack *gp, int surah, int ayah, AyahGlyphs *out)
+static const uint8_t *find_entry(const GlyphPack *gp, int surah, int ayah)
 {
-    if (!gp->data) return false;
-    // Linear scan — packs are small (a few hundred ayat); binary search later.
     for (uint32_t i = 0; i < gp->n_entries; i++) {
         const uint8_t *e = gp->index + (size_t)i * IDX_STRIDE;
-        if (rd_u16(e) == surah && rd_u16(e + 2) == ayah) {
-            uint32_t blob = rd_u32(e + 4);
-            int w = rd_u16(e + 8);
-            int h = rd_u16(e + 10);
-            int nw = rd_u16(e + 12);
-            int colored = gp->flags & 1;   // per-pixel tajweed color plane present
-            size_t planes = (size_t)w * h * (colored ? 2 : 1);
-            size_t need = blob + planes + (size_t)nw * 8;
-            if (need > gp->len) { QN_LOGE(TAG, "blob OOR %d:%d", surah, ayah); return false; }
-            out->surah = surah;
-            out->ayah = ayah;
-            out->w = w;
-            out->h = h;
-            out->n_words = nw;
-            out->alpha = gp->data + blob;
-            out->colidx = colored ? gp->data + blob + (size_t)w * h : NULL;
-            out->words = gp->data + blob + planes;
-            return true;
-        }
+        if (rd_u16(e) == surah && rd_u16(e + 2) == ayah) return e;
     }
-    return false;
+    return NULL;
+}
+
+bool glyphpack_get(GlyphPack *gp, int surah, int ayah, AyahGlyphs *out)
+{
+    if (!gp->file || !gp->index) return false;
+    const uint8_t *e = find_entry(gp, surah, ayah);
+    if (!e) return false;
+
+    uint32_t blob = rd_u32(e + 4);
+    int w  = rd_u16(e + 8);
+    int h  = rd_u16(e + 10);
+    int nw = rd_u16(e + 12);
+    int colored = gp->flags & 1;   // per-pixel tajweed color plane present
+    size_t planes = (size_t)w * h * (colored ? 2 : 1);
+    size_t need   = planes + (size_t)nw * 8;
+
+    // Cache hit? (prev/cur/next stay resident across frames)
+    GpCacheSlot *slot = NULL;
+    for (int i = 0; i < GP_CACHE_N; i++)
+        if (gp->cache[i].surah == surah && gp->cache[i].ayah == ayah) { slot = &gp->cache[i]; break; }
+
+    if (!slot) {
+        // Miss: evict the least-recently-used slot and stream this ayah's blob in.
+        slot = &gp->cache[0];
+        for (int i = 1; i < GP_CACHE_N; i++)
+            if (gp->cache[i].used_at < slot->used_at) slot = &gp->cache[i];
+        if (slot->cap < need) {
+            uint8_t *nb = realloc(slot->blob, need);
+            if (!nb) return false;
+            slot->blob = nb; slot->cap = need;
+        }
+        if ((size_t)hal_fs_pread(gp->file, slot->blob, need, blob) != need) {
+            QN_LOGE(TAG, "blob read failed %d:%d", surah, ayah);
+            slot->surah = -1;
+            return false;
+        }
+        slot->surah = surah; slot->ayah = ayah;
+    }
+    slot->used_at = ++gp->clock;
+
+    out->surah = surah;
+    out->ayah = ayah;
+    out->w = w;
+    out->h = h;
+    out->n_words = nw;
+    out->alpha = slot->blob;
+    out->colidx = colored ? slot->blob + (size_t)w * h : NULL;
+    out->words = slot->blob + planes;
+    return true;
 }
 
 int glyphpack_count(const GlyphPack *gp)
 {
-    return gp->data ? (int)gp->n_entries : 0;
+    return gp->file ? (int)gp->n_entries : 0;
 }
 
-bool glyphpack_at(const GlyphPack *gp, int i, AyahGlyphs *out)
+bool glyphpack_at(GlyphPack *gp, int i, AyahGlyphs *out)
 {
-    if (!gp->data || i < 0 || (uint32_t)i >= gp->n_entries) return false;
+    if (!gp->file || i < 0 || (uint32_t)i >= gp->n_entries) return false;
     const uint8_t *e = gp->index + (size_t)i * IDX_STRIDE;
     return glyphpack_get(gp, rd_u16(e), rd_u16(e + 2), out);
 }

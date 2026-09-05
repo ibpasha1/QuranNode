@@ -210,6 +210,25 @@ bool hal_fs_exists(const char *rel)
     return stat(path, &st) == 0;
 }
 
+// Streaming random-access reads (sim: plain files under ./sdcard).
+struct HalFile { FILE *fp; };
+HalFile *hal_fs_open(const char *rel)
+{
+    char path[512]; sd_path(path, sizeof(path), rel);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    HalFile *f = calloc(1, sizeof(*f));
+    if (!f) { fclose(fp); return NULL; }
+    f->fp = fp;
+    return f;
+}
+int hal_fs_pread(HalFile *f, void *buf, size_t len, size_t offset)
+{
+    if (!f || fseek(f->fp, (long)offset, SEEK_SET) != 0) return -1;
+    return (int)fread(buf, 1, len, f->fp);
+}
+void hal_fs_close(HalFile *f) { if (f) { fclose(f->fp); free(f); } }
+
 int hal_fs_list(const char *rel, char names[][64], int max, bool dirs_only)
 {
     char path[512]; sd_path(path, sizeof(path), rel);

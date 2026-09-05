@@ -27,7 +27,7 @@ QDC = "https://api.qurancdn.com/api/qdc/audio/reciters/{rid}/audio_files?chapter
 # Surahs to fetch audio + timings for. Al-Fatihah (1) stays for the no-SD fallback;
 # Juz Amma (78-114) is the first real SD content. Each whole surah is fetched;
 # the ayah count comes from the API, so just list surah numbers.
-SAMPLE = [1] + list(range(78, 115))
+SAMPLE = list(range(1, 115))   # whole Quran
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUDIO_ROOT = os.path.join(ROOT, "sdcard", "audio", RECITER_DIR)

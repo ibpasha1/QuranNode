@@ -45,6 +45,16 @@ bool hal_fs_exists(const char *rel_path);
 // returns the count (capped at max). dirs_only filters to subdirectories.
 int  hal_fs_list(const char *rel_dir, char names[][64], int max, bool dirs_only);
 
+// --- Streaming file access (for large glyph packs) -----------------------
+// Random-access reads without slurping the whole file — lets the reader stream
+// one ayah at a time so a long surah's pack never has to fit in RAM. Backed by
+// the SD card, or the embedded fallback in flash. hal_fs_pread reads `len` bytes
+// at byte `offset` into buf; returns bytes read (may be < len at EOF) or <0.
+typedef struct HalFile HalFile;
+HalFile *hal_fs_open(const char *rel_path);   // NULL if absent
+int      hal_fs_pread(HalFile *f, void *buf, size_t len, size_t offset);
+void     hal_fs_close(HalFile *f);
+
 // --- Persistent state (small key/blob store) -----------------------------
 // Durable little blobs: resume point, bookmarks, saved loop routines, settings.
 // Named store (sim: a file under the SD root's state/; esp32: NVS). Returns

@@ -357,6 +357,47 @@ bool hal_fs_exists(const char *rel)
     return stat(path, &st) == 0;
 }
 
+// --- Streaming random-access reads (SD file, else embedded flash array) ----
+struct HalFile { FILE *fp; const uint8_t *mem; size_t mem_len; };
+
+HalFile *hal_fs_open(const char *rel)
+{
+    char path[300]; sd_path(path, sizeof(path), rel);
+    FILE *fp = fopen(path, "rb");
+    HalFile *f = calloc(1, sizeof(*f));
+    if (!f) { if (fp) fclose(fp); return NULL; }
+    if (fp) { f->fp = fp; return f; }
+    for (size_t i = 0; i < sizeof(EMBEDDED) / sizeof(EMBEDDED[0]); i++) {
+        if (strcmp(rel, EMBEDDED[i].path) == 0) {
+            f->mem = EMBEDDED[i].s; f->mem_len = *EMBEDDED[i].len;
+            return f;
+        }
+    }
+    free(f);
+    return NULL;
+}
+
+int hal_fs_pread(HalFile *f, void *buf, size_t len, size_t offset)
+{
+    if (!f) return -1;
+    if (f->fp) {
+        if (fseek(f->fp, (long)offset, SEEK_SET) != 0) return -1;
+        return (int)fread(buf, 1, len, f->fp);
+    }
+    if (offset >= f->mem_len) return 0;
+    size_t n = len;
+    if (offset + n > f->mem_len) n = f->mem_len - offset;
+    memcpy(buf, f->mem + offset, n);
+    return (int)n;
+}
+
+void hal_fs_close(HalFile *f)
+{
+    if (!f) return;
+    if (f->fp) fclose(f->fp);
+    free(f);
+}
+
 int hal_fs_list(const char *rel, char names[][64], int max, bool dirs_only)
 {
     char path[300]; sd_path(path, sizeof(path), rel);

@@ -44,6 +44,13 @@ bool hal_fs_slurp(const char *rel, uint8_t **out, size_t *len)
 }
 bool hal_fs_exists(const char *rel)
 { char p[512]; snprintf(p, sizeof(p), "%s/%s", SD_ROOT, rel); struct stat st; return stat(p,&st)==0; }
+struct HalFile { FILE *fp; };
+HalFile *hal_fs_open(const char *rel)
+{ char p[512]; snprintf(p, sizeof(p), "%s/%s", SD_ROOT, rel); FILE *fp = fopen(p,"rb");
+  if (!fp) return NULL; HalFile *f = calloc(1,sizeof(*f)); f->fp = fp; return f; }
+int hal_fs_pread(HalFile *f, void *buf, size_t len, size_t offset)
+{ if (!f || fseek(f->fp,(long)offset,SEEK_SET)!=0) return -1; return (int)fread(buf,1,len,f->fp); }
+void hal_fs_close(HalFile *f){ if (f){ fclose(f->fp); free(f);} }
 int hal_fs_list(const char *rel, char names[][64], int max, bool dirs_only)
 {
     char path[512]; snprintf(path, sizeof(path), "%s/%s", SD_ROOT, rel);
