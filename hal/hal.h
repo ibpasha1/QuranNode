@@ -82,6 +82,29 @@ int     hal_tz_offset_min(void);
 // marks confirm clicks (slightly brighter tick).
 void hal_audio_click(bool accent);
 
+// --- Microphone (Quran Teacher recitation capture) ------------------------
+// Mono s16 capture. hal_mic_start opens the device at (approximately) `hz`;
+// hal_mic_read drains pending samples into buf (returns count, 0 = none yet,
+// -1 = no mic on this platform). Sim: the host microphone via SDL; device:
+// stubbed until an I2S mic (e.g. INMP441) is wired in.
+bool hal_mic_start(uint32_t hz);
+int  hal_mic_read(int16_t *buf, int max_samples);
+void hal_mic_stop(void);
+
+// --- Raw PCM access / playback (Quran Teacher analysis + playback) --------
+// Read a clip's decoded audio as mono s16 starting at start_ms: fills out[]
+// up to max_samples, returns the count and the sample rate via *out_hz.
+// Feeds the recitation-similarity features; also used to slice word segments.
+uint32_t hal_audio_read_pcm16(HalAudioClip *clip, uint32_t start_ms,
+                              int16_t *out, uint32_t max_samples,
+                              uint32_t *out_hz);
+
+// Play a raw mono s16 buffer (the user's own recording). Fire-and-forget;
+// a second call replaces the first. hal_pcm_stop() cuts it short.
+void hal_pcm_play(const int16_t *pcm, uint32_t n_samples, uint32_t hz);
+void hal_pcm_stop(void);
+bool hal_pcm_is_playing(void);
+
 // --- OTA firmware update -------------------------------------------------
 // Bring up Wi-Fi + the HTTP upload server (device only; a no-op/simulated stub
 // elsewhere). hal_ota_url() returns "http://<ip>/" once connected, else NULL.

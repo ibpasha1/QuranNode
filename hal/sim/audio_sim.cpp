@@ -205,6 +205,101 @@ extern "C" void hal_audio_set_rate(HalAudioClip *c, float rate)
 extern "C" void hal_audio_set_volume(float v) { g_volume = v; }
 extern "C" void hal_audio_set_output(int speaker) { (void)speaker; }   // no amp in sim
 
+// --- Raw PCM access ----------------------------------------------------------
+extern "C" uint32_t hal_audio_read_pcm16(HalAudioClip *c, uint32_t start_ms,
+                                         int16_t *out, uint32_t max_samples,
+                                         uint32_t *out_hz)
+{
+    if (!c || !c->pcm || c->rate == 0) return 0;
+    if (out_hz) *out_hz = c->rate;
+    uint64_t start = (uint64_t)start_ms * c->rate / 1000ull;
+    if (start >= c->frames) return 0;
+    uint64_t n = c->frames - start;
+    if (n > max_samples) n = max_samples;
+    const int ch = (int)c->channels;
+    for (uint64_t i = 0; i < n; i++) {
+        // Mix channels to mono, clamp to s16.
+        float s = 0.f;
+        for (int k = 0; k < ch; k++) s += c->pcm[(start + i) * ch + k];
+        s /= (float)ch;
+        if (s > 1.f) s = 1.f; else if (s < -1.f) s = -1.f;
+        out[i] = (int16_t)(s * 32767.f);
+    }
+    return (uint32_t)n;
+}
+
+// --- Microphone (host capture via SDL) ---------------------------------------
+static SDL_AudioDeviceID g_mic_dev = 0;
+
+extern "C" bool hal_mic_start(uint32_t hz)
+{
+    if (g_mic_dev) return true;
+    SDL_AudioSpec want, have;
+    SDL_zero(want);
+    want.freq = (int)hz;
+    want.format = AUDIO_S16SYS;
+    want.channels = 1;
+    want.samples = 1024;
+    want.callback = nullptr;   // queue (pull) mode
+    g_mic_dev = SDL_OpenAudioDevice(nullptr, 1 /*capture*/, &want, &have,
+                                    SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+    if (!g_mic_dev) return false;
+    SDL_PauseAudioDevice(g_mic_dev, 0);
+    return true;
+}
+
+extern "C" int hal_mic_read(int16_t *buf, int max_samples)
+{
+    if (!g_mic_dev) return -1;
+    Uint32 avail = SDL_GetQueuedAudioSize(g_mic_dev);
+    Uint32 want = (Uint32)max_samples * sizeof(int16_t);
+    if (avail > want) avail = want;
+    if (avail < sizeof(int16_t)) return 0;
+    Uint32 got = SDL_DequeueAudio(g_mic_dev, buf, avail);
+    return (int)(got / sizeof(int16_t));
+}
+
+extern "C" void hal_mic_stop(void)
+{
+    if (!g_mic_dev) return;
+    SDL_CloseAudioDevice(g_mic_dev);
+    g_mic_dev = 0;
+}
+
+// --- Raw PCM playback (the user's own recording) -----------------------------
+static SDL_AudioDeviceID g_pcm_dev = 0;
+static uint32_t g_pcm_hz = 0;
+
+extern "C" void hal_pcm_play(const int16_t *pcm, uint32_t n_samples, uint32_t hz)
+{
+    if (g_pcm_dev && g_pcm_hz != hz) { SDL_CloseAudioDevice(g_pcm_dev); g_pcm_dev = 0; }
+    if (!g_pcm_dev) {
+        SDL_AudioSpec want;
+        SDL_zero(want);
+        want.freq = (int)hz;
+        want.format = AUDIO_S16SYS;
+        want.channels = 1;
+        want.samples = 1024;
+        want.callback = nullptr;
+        g_pcm_dev = SDL_OpenAudioDevice(nullptr, 0, &want, nullptr, 0);
+        if (!g_pcm_dev) return;
+        g_pcm_hz = hz;
+        SDL_PauseAudioDevice(g_pcm_dev, 0);
+    }
+    SDL_ClearQueuedAudio(g_pcm_dev);
+    SDL_QueueAudio(g_pcm_dev, pcm, n_samples * sizeof(int16_t));
+}
+
+extern "C" void hal_pcm_stop(void)
+{
+    if (g_pcm_dev) SDL_ClearQueuedAudio(g_pcm_dev);
+}
+
+extern "C" bool hal_pcm_is_playing(void)
+{
+    return g_pcm_dev && SDL_GetQueuedAudioSize(g_pcm_dev) > 0;
+}
+
 // --- UI click ----------------------------------------------------------------
 // A ~12ms decaying sine tick on its own small queue device, so it never touches
 // the recitation path (no locks, no SoundTouch). Accent clicks ring brighter.

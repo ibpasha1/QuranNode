@@ -26,7 +26,7 @@ typedef struct {
 static const HomeItem ITEMS[] = {
     { "Quran",         ICON_BOOK,   SCENE_NAV },
     { "Lessons",       ICON_NOTE,   SCENE_COUNT },
-    { "Quran Teacher", ICON_WAVE,   SCENE_COUNT },
+    { "Quran Teacher", ICON_WAVE,   SCENE_TEACHER },
     { "Practice",      ICON_REPEAT, SCENE_LOOP },
     { "Library",       ICON_FOLDER, SCENE_LIBRARY },
     { "Settings",      ICON_GEAR,   SCENE_SETTINGS },

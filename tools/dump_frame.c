@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <sys/stat.h>
 #include <dirent.h>
 
@@ -94,6 +95,56 @@ void hal_audio_set_rate(HalAudioClip *c, float r){ (void)c; s_aud_rate = r; }
 void hal_audio_set_volume(float v){ (void)v; }
 void hal_audio_set_output(int speaker){ (void)speaker; }
 void hal_audio_click(bool accent){ (void)accent; }
+
+// --- Teacher audio: deterministic synthetic "recitation" -------------------
+// Both the clip PCM and the mic produce the SAME synthetic signal (a slow
+// amplitude-modulated tone with word-ish bursts), so the teacher scene's
+// align-and-score pipeline runs end-to-end headlessly and deterministically:
+// identical signals must score every word as a match.
+#define SYN_HZ 16000
+static int16_t syn_sample(uint64_t i)
+{
+    double t = (double)i / SYN_HZ;
+    double burst = 0.15 + 0.85 * (0.5 + 0.5 * sin(6.2831853 * 0.9 * t));
+    double s = sin(6.2831853 * 200.0 * t) * 0.5
+             + sin(6.2831853 * 417.0 * t) * 0.3;
+    return (int16_t)(s * burst * 12000.0);
+}
+
+uint32_t hal_audio_read_pcm16(HalAudioClip *c, uint32_t start_ms,
+                              int16_t *out, uint32_t max_samples, uint32_t *out_hz)
+{
+    (void)c;
+    if (out_hz) *out_hz = SYN_HZ;
+    uint64_t start = (uint64_t)start_ms * SYN_HZ / 1000ull;
+    // Pretend the decoded clip is 8s so a scripted 8s "recitation" (the same
+    // generator) aligns 1:1 and must score every word as a match.
+    uint64_t total = (uint64_t)8000 * SYN_HZ / 1000ull;
+    if (start >= total) return 0;
+    uint64_t n = total - start;
+    if (n > max_samples) n = max_samples;
+    for (uint64_t i = 0; i < n; i++) out[i] = syn_sample(start + i);
+    return (uint32_t)n;
+}
+
+static uint64_t s_mic_pos;
+static bool s_mic_on;
+bool hal_mic_start(uint32_t hz) { (void)hz; s_mic_on = true; s_mic_pos = 0; return true; }
+void hal_mic_stop(void) { s_mic_on = false; }
+int hal_mic_read(int16_t *buf, int max_samples)
+{
+    // Emit the synthetic signal in real-time-ish chunks (33ms per tick).
+    if (!s_mic_on) return -1;
+    int n = SYN_HZ * 33 / 1000;
+    if (n > max_samples) n = max_samples;
+    for (int i = 0; i < n; i++) buf[i] = syn_sample(s_mic_pos + i);
+    s_mic_pos += n;
+    return n;
+}
+
+void hal_pcm_play(const int16_t *pcm, uint32_t n, uint32_t hz) { (void)pcm; (void)n; (void)hz; }
+void hal_pcm_stop(void) {}
+bool hal_pcm_is_playing(void) { return false; }
 // Fixed wall clock (2026-09-04 ~12:00 EDT) so golden frames are deterministic.
 int64_t hal_wall_clock(void){ return 1788537600; }
 int hal_tz_offset_min(void){ return -240; }
@@ -154,6 +205,13 @@ int main(int argc, char **argv)
         case 'k': app_input(ev(INPUT_BTN_BOOKMARK)); break;
         case 'l': app_input(ev(INPUT_NAV_LEFT));  break;
         case 'h': app_input(ev(INPUT_NAV_RIGHT)); break;
+        case 't':   // advance 500ms of virtual time mid-script (33ms ticks)
+            for (int i = 0; i < 15; i++) {
+                s_clock += 33;
+                aud_advance(33);
+                app_tick(33);
+            }
+            break;
         }
     }
 

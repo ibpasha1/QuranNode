@@ -10,12 +10,13 @@
 #include "input.h"
 
 typedef enum {
-    SCENE_HOME = 0,   // calm home: next prayer, "continue reading", today's progress
+    SCENE_HOME = 0,   // launcher: continue-reading hero, prayer strip, app list
     SCENE_READER,     // the focus reader (centered ayah + synced recitation)
     SCENE_LOOP,       // ayah-loop / repeat routine editor (hifz)
     SCENE_NAV,        // Surah > Juz > Page > Ayah jump
     SCENE_LIBRARY,    // local audio player (nasheeds / lectures / audiobooks)
     SCENE_SETTINGS,   // preferences
+    SCENE_TEACHER,    // listen -> recite -> analyze -> review practice loop
     SCENE_COUNT,
 } SceneID;
 

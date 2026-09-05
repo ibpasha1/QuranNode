@@ -212,3 +212,18 @@ void hal_audio_set_output(int speaker) {
 // UI click: no-op on device for now. TODO: mix a short tick into the I2S
 // stream (needs a tiny mixer stage in the render task; avoid amp pops).
 void hal_audio_click(bool accent) { (void)accent; }
+
+// --- Quran Teacher audio (not yet on device) -------------------------------
+// Mic capture needs an I2S mic (e.g. INMP441) that this board doesn't have
+// wired yet; PCM readback needs a decode-to-PSRAM path (we stream-decode).
+// All stubbed so the core compiles; the teacher scene shows "mic not
+// available" when hal_mic_start() fails.
+bool hal_mic_start(uint32_t hz) { (void)hz; return false; }
+int  hal_mic_read(int16_t *buf, int max_samples) { (void)buf; (void)max_samples; return -1; }
+void hal_mic_stop(void) {}
+uint32_t hal_audio_read_pcm16(HalAudioClip *clip, uint32_t start_ms,
+                              int16_t *out, uint32_t max_samples, uint32_t *out_hz)
+{ (void)clip; (void)start_ms; (void)out; (void)max_samples; if (out_hz) *out_hz = 0; return 0; }
+void hal_pcm_play(const int16_t *pcm, uint32_t n, uint32_t hz) { (void)pcm; (void)n; (void)hz; }
+void hal_pcm_stop(void) {}
+bool hal_pcm_is_playing(void) { return false; }
