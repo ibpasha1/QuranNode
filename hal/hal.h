@@ -70,6 +70,18 @@ void   hal_audio_set_rate(HalAudioClip *clip, float rate);  // 1.0 = normal, 0.8
 void   hal_audio_set_volume(float vol);               // gain multiplier (1.0 = unity)
 void   hal_audio_set_output(int speaker);             // 1 = speaker (amp on when playing), 0 = headphone
 
+// --- Wall clock ----------------------------------------------------------
+// Real-world time for the home clock + prayer times: seconds since the Unix
+// epoch (UTC), or 0 when unknown (device before its clock is set). The tz
+// offset is local-minus-UTC in minutes (sim: from the host; device: config).
+int64_t hal_wall_clock(void);
+int     hal_tz_offset_min(void);
+
+// --- UI sounds -----------------------------------------------------------
+// Short UI tick for menu scrolling / selection. Cheap and rate-safe; `accent`
+// marks confirm clicks (slightly brighter tick).
+void hal_audio_click(bool accent);
+
 // --- OTA firmware update -------------------------------------------------
 // Bring up Wi-Fi + the HTTP upload server (device only; a no-op/simulated stub
 // elsewhere). hal_ota_url() returns "http://<ip>/" once connected, else NULL.

@@ -6,7 +6,7 @@
 #include <stdio.h>
 
 static const char *TAG = "PREFS";
-#define PREFS_MAGIC 0x51505231u   // "QPR1"
+#define PREFS_MAGIC 0x51505232u   // "QPR2" (v2 added lat/lng)
 
 typedef struct { uint32_t magic; Prefs p; } PrefsBlob;
 
@@ -20,6 +20,10 @@ static void set_defaults(void)
     g_prefs.tajweed = 0;
     g_prefs.volume = 90;     // -> ~1.8x gain (line-out is quiet)
     g_prefs.output = 0;      // headphone
+    // Prayer-time location. New York until a Settings editor / GPS exists —
+    // edit here (or the persisted blob) for your city.
+    g_prefs.lat = 40.71f;
+    g_prefs.lng = -74.01f;
 }
 
 void prefs_init(void)
@@ -41,6 +45,10 @@ void prefs_init(void)
     if (g_prefs.brightness > 100) g_prefs.brightness = 100;
     if (g_prefs.volume > 100) g_prefs.volume = 100;
     if (g_prefs.output > 1) g_prefs.output = 0;
+    if (g_prefs.lat < -90.f || g_prefs.lat > 90.f ||
+        g_prefs.lng < -180.f || g_prefs.lng > 180.f) {
+        g_prefs.lat = 40.71f; g_prefs.lng = -74.01f;
+    }
     prefs_apply();
 }
 

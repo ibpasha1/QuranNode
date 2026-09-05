@@ -208,3 +208,7 @@ void hal_audio_set_output(int speaker) {
     s_output_speaker = (speaker != 0);
     if (!s_output_speaker) gpio_set_level(PIN_AMP_EN, 0);   // mute amp in headphone mode
 }
+
+// UI click: no-op on device for now. TODO: mix a short tick into the I2S
+// stream (needs a tiny mixer stage in the render task; avoid amp pops).
+void hal_audio_click(bool accent) { (void)accent; }

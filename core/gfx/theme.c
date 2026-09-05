@@ -1,4 +1,5 @@
 #include "theme.h"
+#include "plat.h"
 #include <stdio.h>
 
 // Per-track identity hues. Kept vivid on purpose — these double as the pad RGB
@@ -58,6 +59,16 @@ void theme_icon(Canvas *c, int x, int y, UiIcon icon, color_t col, color_t bg)
         canvas_circle_fill(c, x + 4, y + 1, 1, col);       // dot
         canvas_vline(c, x + 4, y + 3, 5, col);             // stem
         break;
+    case ICON_BOOK:                                        // open mushaf
+        canvas_rect_fill(c, x, y + 1, 4, 7, col);
+        canvas_rect_fill(c, x + 5, y + 1, 4, 7, col);
+        canvas_vline(c, x + 4, y, 9, col);                 // spine
+        canvas_hline(c, x, y + 8, 9, col);
+        break;
+    case ICON_REPEAT:                                      // loop arrows
+        canvas_circle(c, x + 4, y + 4, 3, col);
+        canvas_rect_fill(c, x + 6, y, 3, 3, col);          // arrowhead
+        break;
     default: break;
     }
 }
@@ -86,6 +97,44 @@ void theme_hint(Canvas *c, const char *hint)
 void theme_sel_block(Canvas *c, int x, int y, int w, int h)
 {
     canvas_rect_fill(c, x, y, w, h, THEME_SEL_BG);
+}
+
+// --- Interactive key guide --------------------------------------------------
+static InputEventType s_kb_last = INPUT_NONE;
+static uint32_t       s_kb_ms;
+
+void theme_keybar_note(InputEventType t)
+{
+    s_kb_last = t;
+    s_kb_ms = plat_millis();
+}
+
+void theme_keybar(Canvas *c, const KeyChip *chips, int n)
+{
+    int y = CANVAS_HEIGHT - THEME_KEYBAR_H;
+    canvas_rect_fill(c, 0, y, CANVAS_WIDTH, THEME_KEYBAR_H, THEME_PANEL);
+    canvas_hline(c, 0, y, CANVAS_WIDTH, THEME_GRID);
+
+    // The chip whose button fired in the last few frames lights up gold.
+    bool fresh = (uint32_t)(plat_millis() - s_kb_ms) < 160;
+
+    int x = 6;
+    for (int i = 0; i < n; i++) {
+        const KeyChip *k = &chips[i];
+        bool hot = false;
+        if (fresh)
+            for (int e = 0; e < k->ev_n; e++)
+                if (k->evs[e] == s_kb_last) { hot = true; break; }
+
+        int kw = font_string_width(&font_tiny, k->key) + 6;
+        canvas_rect_fill(c, x, y + 3, kw, 11, hot ? THEME_ACCENT : THEME_GRID);
+        font_draw_string(c, x + 3, y + 5, &font_tiny, k->key,
+                         hot ? THEME_SEL_TEXT : THEME_TEXT);
+        x += kw + 4;
+        font_draw_string(c, x, y + 5, &font_tiny, k->action,
+                         hot ? THEME_ACCENT : THEME_DIM);
+        x += font_string_width(&font_tiny, k->action) + 10;
+    }
 }
 
 void theme_cell(Canvas *c, int cx, int y, int cellw, const char *s, bool sel, color_t col)

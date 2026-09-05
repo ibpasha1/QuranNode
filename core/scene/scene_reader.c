@@ -21,10 +21,11 @@
 static GlyphPack s_pack;
 static bool   s_pack_ok = false;
 static int    s_pack_size = -1;  // font size the loaded pack was built for
+static int    s_pack_tj = -1;    // tajweed flag the loaded pack matches
 static int    s_bm_toast = 0;    // frames remaining on the "Bookmarked" confirmation
 #define s_player g_player   // the reader drives the shared transport
 
-// Height of the opaque transport panel (above the 11px hint rail).
+// Height of the opaque transport panel (above the keybar).
 #define FOOT_H 28
 
 static void mmss(uint32_t ms, char *b, int n)
@@ -33,13 +34,19 @@ static void mmss(uint32_t ms, char *b, int n)
     snprintf(b, n, "%u:%02u", s / 60, s % 60);
 }
 
-// Load (or reload) the glyph pack for the current font-size preference.
+// Load (or reload) the glyph pack for the current font-size + tajweed prefs.
+// Keyed on BOTH: the colored packs are separate _tj files, so flipping the
+// tajweed toggle must reload just like a size change (this was the "tajweed
+// colors don't work" bug — the mono pack stayed loaded until a size change).
 static void ensure_pack(void)
 {
-    if (s_pack_ok && s_pack_size == g_prefs.font_size) return;
+    if (s_pack_ok && s_pack_size == g_prefs.font_size &&
+        s_pack_tj == g_prefs.tajweed)
+        return;
     if (s_pack_ok) { glyphpack_close(&s_pack); s_pack_ok = false; }
     s_pack_ok = glyphpack_open(&s_pack, prefs_font_pack());
     s_pack_size = g_prefs.font_size;
+    s_pack_tj = g_prefs.tajweed;
 }
 
 static const char *surah_name(int s)
@@ -152,7 +159,7 @@ static void on_render(Canvas *c)
     // The transport panel is opaque and drawn AFTER the text, so no ayah can
     // ever collide with the position bar / reciter line again — overflow is
     // cleanly clipped behind the panel instead.
-    int foot_y = CANVAS_HEIGHT - 11 - FOOT_H;   // panel top, above the hint rail
+    int foot_y = CANVAS_HEIGHT - THEME_KEYBAR_H - FOOT_H;   // above the keybar
     {
         // Center the focused ayah in the reading band (below header, above the
         // transport panel); clamp the top so tall (large-font / multi-line)
@@ -223,9 +230,38 @@ static void on_render(Canvas *c)
         font_draw_string_centered(c, ty + 4, &font_tiny, "Bookmarked", THEME_ACTIVE);
     }
 
-    theme_hint(c, s_player.loop.active ? "MODE edit loop   SEL pause   <>exit loop   BACK home"
-             : s_player.playing ? "ENC speed   SEL pause   MODE loop   BACK home"
-                                : "ENC ayah  K bookmark  MODE loop  BACK home");
+    // Live keybar: the chips track the transport state, so the guide always
+    // says what the buttons do RIGHT NOW (encoder = speed only while playing).
+    if (s_player.loop.active) {
+        KeyChip chips[4] = {
+            { "OK", s_player.playing ? "PAUSE" : "PLAY", 3,
+              { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
+            { "MD", "EDIT LOOP", 1, { INPUT_BTN_MODE } },
+            { "<>", "EXIT", 4, { INPUT_NAV_LEFT, INPUT_NAV_RIGHT,
+                                 INPUT_NAV_UP, INPUT_NAV_DOWN } },
+            { "BK", "HOME", 2, { INPUT_BTN_BACK, INPUT_BTN_MENU } },
+        };
+        theme_keybar(c, chips, 4);
+    } else if (s_player.playing) {
+        KeyChip chips[4] = {
+            { "OK", "PAUSE", 3,
+              { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
+            { "<>", "SPEED", 2, { INPUT_ENC_CW, INPUT_ENC_CCW } },
+            { "MD", "LOOP", 1, { INPUT_BTN_MODE } },
+            { "BK", "HOME", 2, { INPUT_BTN_BACK, INPUT_BTN_MENU } },
+        };
+        theme_keybar(c, chips, 4);
+    } else {
+        KeyChip chips[4] = {
+            { "OK", "PLAY", 3,
+              { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
+            { "<>", "AYAH", 4, { INPUT_ENC_CW, INPUT_ENC_CCW,
+                                 INPUT_NAV_LEFT, INPUT_NAV_RIGHT } },
+            { "KB", "MARK", 1, { INPUT_BTN_BOOKMARK } },
+            { "BK", "HOME", 2, { INPUT_BTN_BACK, INPUT_BTN_MENU } },
+        };
+        theme_keybar(c, chips, 4);
+    }
 }
 
 static void on_input(InputEvent e)

@@ -3,6 +3,7 @@
 #include "player.h"
 #include "progress.h"
 #include "prefs.h"
+#include "theme.h"
 #include "tween.h"
 #include "plat.h"
 
@@ -23,6 +24,7 @@ void app_tick(uint32_t dt_ms)
 
 void app_input(InputEvent ev)
 {
+    theme_keybar_note(ev.type);   // lights the matching key chip in the keybar
     scene_handle_input(ev);
 }
 

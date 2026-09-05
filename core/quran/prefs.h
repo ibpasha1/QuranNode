@@ -20,6 +20,7 @@ typedef struct {
     uint8_t tajweed;     // 0/1 — color the text by tajweed rule
     uint8_t volume;      // 0 .. 100 (%) — software gain
     uint8_t output;      // 0 = headphone, 1 = speaker (amp enable)
+    float   lat, lng;    // prayer-time location (degrees, +N/+E)
 } Prefs;
 
 extern Prefs g_prefs;

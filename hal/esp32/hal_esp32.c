@@ -25,6 +25,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <dirent.h>
 
@@ -34,6 +35,18 @@ static const char *TAG = "HAL";
 void audio_esp32_init(void);
 
 uint32_t plat_millis(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+// Wall clock: valid once SNTP (or a future RTC) has set system time; an unset
+// clock reads as ~1970 which we report as "unknown" so the UI can say so.
+// TODO(wifi): start SNTP after the OTA Wi-Fi bring-up so this becomes real.
+int64_t hal_wall_clock(void)
+{
+    time_t t = time(NULL);
+    return t > 1600000000 ? (int64_t)t : 0;
+}
+
+// TODO: expose in Settings; US Eastern (EDT) default for now.
+int hal_tz_offset_min(void) { return -240; }
 
 // -------------------------------------------------------------------------
 // 5-way navigation switch (active-low GPIOs, internal pull-ups, COM->GND). This

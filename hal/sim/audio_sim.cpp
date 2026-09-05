@@ -204,3 +204,34 @@ extern "C" void hal_audio_set_rate(HalAudioClip *c, float rate)
 
 extern "C" void hal_audio_set_volume(float v) { g_volume = v; }
 extern "C" void hal_audio_set_output(int speaker) { (void)speaker; }   // no amp in sim
+
+// --- UI click ----------------------------------------------------------------
+// A ~12ms decaying sine tick on its own small queue device, so it never touches
+// the recitation path (no locks, no SoundTouch). Accent clicks ring brighter.
+static SDL_AudioDeviceID g_click_dev = 0;
+
+extern "C" void hal_audio_click(bool accent)
+{
+    if (!g_click_dev) {
+        SDL_AudioSpec want;
+        SDL_zero(want);
+        want.freq = 22050;
+        want.format = AUDIO_F32SYS;
+        want.channels = 1;
+        want.samples = 256;
+        want.callback = nullptr;   // push (queue) mode
+        g_click_dev = SDL_OpenAudioDevice(nullptr, 0, &want, nullptr, 0);
+        if (!g_click_dev) return;
+        SDL_PauseAudioDevice(g_click_dev, 0);
+    }
+    const int N = 22050 * 12 / 1000;
+    float buf[N];
+    const float freq = accent ? 1760.0f : 1175.0f;
+    for (int i = 0; i < N; i++) {
+        float t = (float)i / 22050.0f;
+        buf[i] = 0.16f * expf(-t * 420.0f) * sinf(6.2831853f * freq * t);
+    }
+    // Don't let rapid scrolling pile up latency: skip if a few are queued.
+    if (SDL_GetQueuedAudioSize(g_click_dev) < 3 * sizeof(buf))
+        SDL_QueueAudio(g_click_dev, buf, sizeof(buf));
+}

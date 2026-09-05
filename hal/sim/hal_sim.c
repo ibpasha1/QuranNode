@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -160,6 +161,23 @@ bool hal_input_poll(InputEvent *out)
 }
 
 uint32_t plat_millis(void) { return SDL_GetTicks(); }
+
+// --- Wall clock (host time) ------------------------------------------------
+int64_t hal_wall_clock(void) { return (int64_t)time(NULL); }
+
+int hal_tz_offset_min(void)
+{
+    time_t t = time(NULL);
+    struct tm lt, gt;
+    localtime_r(&t, &lt);
+    gmtime_r(&t, &gt);
+    int d = (lt.tm_hour - gt.tm_hour) * 60 + (lt.tm_min - gt.tm_min);
+    // Correct for the pair straddling midnight (yday differs by ±1 or wraps).
+    int dd = lt.tm_yday - gt.tm_yday;
+    if (dd == 1 || dd < -1) d += 1440;
+    else if (dd == -1 || dd > 1) d -= 1440;
+    return d;
+}
 
 // --- Filesystem (rooted at ./sdcard) -------------------------------------
 static void sd_path(char *dst, size_t n, const char *rel)

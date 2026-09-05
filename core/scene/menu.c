@@ -4,12 +4,12 @@
 #include "tween.h"
 #include "plat.h"
 #include "input_accel.h"
+#include "hal.h"
 #include <string.h>
 #include <stdio.h>
 
-// UI click feedback hook. On hardware this can later drive a short tick through
-// the audio HAL; for now it's a no-op — the reader UX is intentionally quiet.
-static inline void menu_click(bool accent) { (void)accent; }
+// UI click feedback: a short tick through the audio HAL (accent = confirm).
+static inline void menu_click(bool accent) { hal_audio_click(accent); }
 
 // Hold-to-scroll ramp. Shared across Menu instances — only one menu receives
 // input at a time, and a scene switch is a >250ms gap that resets it anyway.

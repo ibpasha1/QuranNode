@@ -211,11 +211,13 @@ static void move(int dir)
 {
     int n = entry_count();
     if (n == 0) return;
+    int was = s_sel;
     s_sel += dir * input_accel_step(&s_accel, dir, plat_millis());
     if (s_sel < 0) s_sel = 0;
     if (s_sel >= n) s_sel = n - 1;
     if (s_sel < s_scroll) s_scroll = s_sel;
     if (s_sel >= s_scroll + VIS) s_scroll = s_sel - VIS + 1;
+    if (s_sel != was) hal_audio_click(false);
 }
 
 static void on_render(Canvas *c)

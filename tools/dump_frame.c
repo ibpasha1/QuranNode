@@ -93,6 +93,10 @@ void hal_audio_seek_ms(HalAudioClip *c, uint32_t m){ (void)c; s_aud_pos = m; }
 void hal_audio_set_rate(HalAudioClip *c, float r){ (void)c; s_aud_rate = r; }
 void hal_audio_set_volume(float v){ (void)v; }
 void hal_audio_set_output(int speaker){ (void)speaker; }
+void hal_audio_click(bool accent){ (void)accent; }
+// Fixed wall clock (2026-09-04 ~12:00 EDT) so golden frames are deterministic.
+int64_t hal_wall_clock(void){ return 1788537600; }
+int hal_tz_offset_min(void){ return -240; }
 static bool s_dump_ota;
 void hal_ota_start(void){ s_dump_ota = true; }
 const char *hal_ota_url(void){ return s_dump_ota ? "http://192.168.86.20/" : NULL; }

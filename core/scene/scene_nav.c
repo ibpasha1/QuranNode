@@ -11,6 +11,7 @@
 #include "font.h"
 #include "canvas.h"
 #include "input_accel.h"
+#include "hal.h"
 #include "plat.h"
 #include <stdio.h>
 
@@ -147,9 +148,16 @@ static void on_render(Canvas *c)
         snprintf(right, sizeof(right), "%d/%d", sel + 1, count);
     theme_header(c, mode_title(), THEME_TITLE, right[0] ? right : NULL, THEME_DIM);
 
+    KeyChip chips[3] = {
+        { "^v", s_mode == NAV_ROOT ? "CHOOSE" : "SCROLL", 4,
+          { INPUT_NAV_UP, INPUT_NAV_DOWN, INPUT_ENC_CW, INPUT_ENC_CCW } },
+        { "OK", "OPEN", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
+        { "BK", s_mode == NAV_ROOT ? "HOME" : "BACK", 1, { INPUT_BTN_BACK } },
+    };
+
     if (s_mode == NAV_ROOT) {
         render_root(c);
-        theme_hint(c, "UP/DN move   SEL open   BACK home");
+        theme_keybar(c, chips, 3);
         return;
     }
 
@@ -185,7 +193,7 @@ static void on_render(Canvas *c)
         canvas_rect_fill(c, CANVAS_WIDTH - 3, ty, 3, th, THEME_ACCENT);
     }
 
-    theme_hint(c, "UP/DN move (hold = faster)   SEL open   BACK up");
+    theme_keybar(c, chips, 3);
 }
 
 static void move(int dir)
@@ -196,15 +204,18 @@ static void move(int dir)
     // holding a key sweeps the 114-surah list instead of crawling it.
     int step = input_accel_step(&s_accel, dir, plat_millis());
     int *sel = &s_sel[s_mode], *scroll = &s_scroll[s_mode];
+    int was = *sel;
     *sel += dir * step;
     if (*sel < 0) *sel = 0;
     if (*sel >= count) *sel = count - 1;
     if (*sel < *scroll) *scroll = *sel;
     if (*sel >= *scroll + VIS) *scroll = *sel - VIS + 1;
+    if (*sel != was) hal_audio_click(false);
 }
 
 static void enter(void)
 {
+    hal_audio_click(true);
     int sel = s_sel[s_mode];
     switch (s_mode) {
     case NAV_ROOT:
