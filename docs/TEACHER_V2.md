@@ -153,6 +153,31 @@ enter the git repo (`training_takes*/` gitignored).
   gives phone-level durations — rule-based tajweed hints become feasible),
   multi-reciter references, personal progress stats.
 
+## Productization: self-hosted scoring cluster
+
+The server is stateless HTTP, so multi-user hosting is horizontal scaling
+of identical nodes behind nginx/HAProxy — any node scores any request.
+
+Sizing (whisper-base int8, one take ≈ one short CPU job):
+- Pi 5 (4x A76): 3–8s per take → ~5–10 simultaneously practicing users
+  per Pi; a 4-Pi cluster ≈ 20–40 concurrent ≈ hundreds of registered users.
+  `whisper-tiny-ar-quran` is ~3x faster at measurable accuracy cost (the
+  M1 benchmark quantifies it).
+- Better perf/$: one N100-class mini-PC or an 8-core VPS outruns 4 Pis;
+  a Mac mini outruns all of them. The Pi cluster's real advantages are
+  one-time cost, no monthly bill, and the privacy story ("recitations
+  never leave hardware we own").
+
+Product-grade requirements beyond the LAN MVP:
+- HTTPS + per-device bearer tokens (ESP32 already speaks TLS for OTA)
+- process-and-delete audio policy — never store recitations
+- rate limiting + queueing (expect post-maghrib load spikes)
+- health checks / node rotation; the device's offline fallback means a
+  down cluster degrades to local scoring, never a bricked practice session
+
+Nothing in the device or protocol changes across hosting choices — Mac,
+Pi cluster, and VPS are just different URLs.
+
 ## Risks
 
 | Risk | Mitigation |
