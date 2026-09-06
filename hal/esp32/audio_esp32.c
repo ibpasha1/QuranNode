@@ -57,10 +57,16 @@ static bool s_output_speaker = false;
 
 static void spk(bool on) { gpio_set_level(PIN_AMP_EN, (s_output_speaker && on) ? 1 : 0); }
 
+bool audio_esp32_pcm_pump(void);   // user-recording playback (defined below)
+
 static void audio_task(void *arg)
 {
     (void)arg;
     while (1) {
+        // The user's own recording (teacher "hear yourself") takes priority;
+        // the scene pauses the clip first, so they never overlap.
+        if (audio_esp32_pcm_pump()) continue;
+
         xSemaphoreTake(s_mtx, portMAX_DELAY);
         HalAudioClip *c = s_cur;
         bool play = s_playing;
@@ -274,12 +280,112 @@ void hal_mic_stop(void)
     s_rx = NULL; s_mic_ok = false;
 }
 
-// --- Reference recitation PCM readback (still TODO on device) --------------
-// The teacher's alignment/compare needs the reference ayah decoded to PCM at a
-// given offset. Not yet implemented (streaming decoder is playback-oriented).
+// --- Reference recitation PCM readback (Quran Teacher analysis) ------------
+// Full decode of the clip's MP3 to mono s16 with a LOCAL decoder instance —
+// playback's s_dec/s_pcm stay untouched, and the clip's mp3 bytes are only
+// read, so this is safe even while the clip is playing. Runs on the caller's
+// task: qn_main has a 40KB stack precisely for minimp3's ~18KB decode
+// scratch. An ayah decodes in well under a second (shown as "ANALYZING...").
 uint32_t hal_audio_read_pcm16(HalAudioClip *clip, uint32_t start_ms,
                               int16_t *out, uint32_t max_samples, uint32_t *out_hz)
-{ (void)clip; (void)start_ms; (void)out; (void)max_samples; if (out_hz) *out_hz = 0; return 0; }
-void hal_pcm_play(const int16_t *pcm, uint32_t n, uint32_t hz) { (void)pcm; (void)n; (void)hz; }
-void hal_pcm_stop(void) {}
-bool hal_pcm_is_playing(void) { return false; }
+{
+    if (out_hz) *out_hz = 0;
+    if (!clip || !clip->mp3 || !max_samples) return 0;
+
+    mp3dec_t *dec = malloc(sizeof(mp3dec_t));
+    if (!dec) return 0;
+    mp3dec_init(dec);
+
+    int16_t frame[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    size_t pos = 0;
+    uint32_t emitted = 0;   // mono samples written to out
+    uint64_t seen = 0;      // mono samples decoded so far (for start_ms skip)
+    uint64_t skip = 0;
+    int hz = 0;
+
+    while (pos < clip->mp3_len && emitted < max_samples) {
+        mp3dec_frame_info_t fi;
+        int samples = mp3dec_decode_frame(dec, clip->mp3 + pos,
+                                          (int)(clip->mp3_len - pos), frame, &fi);
+        if (fi.frame_bytes <= 0) break;
+        pos += (size_t)fi.frame_bytes;
+        if (samples <= 0) continue;
+        if (!hz) {
+            hz = fi.hz;
+            skip = (uint64_t)start_ms * (uint64_t)hz / 1000ull;
+        }
+        for (int i = 0; i < samples && emitted < max_samples; i++, seen++) {
+            if (seen < skip) continue;
+            if (fi.channels == 2)
+                out[emitted++] = (int16_t)(((int32_t)frame[i * 2] +
+                                            frame[i * 2 + 1]) / 2);
+            else
+                out[emitted++] = frame[i];
+        }
+    }
+    free(dec);
+    if (out_hz) *out_hz = (uint32_t)hz;
+    return emitted;
+}
+
+// --- Raw PCM playback (the user's own recording, "hear yourself") ----------
+// A second source for the audio task: mono s16 at s_up_hz, nearest-neighbor
+// upsampled to OUT_RATE stereo. The teacher pauses the clip first, so the two
+// sources are never active together; the task checks this one first.
+static const int16_t *s_up_pcm;
+static uint32_t s_up_n, s_up_pos, s_up_hz, s_up_phase;
+
+void hal_pcm_play(const int16_t *pcm, uint32_t n, uint32_t hz)
+{
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    s_up_pcm = pcm;
+    s_up_n = n;
+    s_up_pos = 0;
+    s_up_phase = 0;
+    s_up_hz = hz ? hz : 16000;
+    xSemaphoreGive(s_mtx);
+}
+
+void hal_pcm_stop(void)
+{
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    s_up_pcm = NULL;
+    xSemaphoreGive(s_mtx);
+}
+
+bool hal_pcm_is_playing(void) { return s_up_pcm != NULL; }
+
+// Called by the audio task each loop: fills + writes one chunk of the user
+// PCM. Returns true if it produced output (skip the mp3 path this iteration).
+bool audio_esp32_pcm_pump(void)
+{
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    const int16_t *src = s_up_pcm;
+    if (!src || !s_i2s_ok) { xSemaphoreGive(s_mtx); return false; }
+
+    int16_t buf[512];   // 256 stereo frames (~5.8ms @44.1k)
+    int of = 0;
+    while (of < 256 && s_up_pos < s_up_n) {
+        int16_t s = sat16(((int32_t)src[s_up_pos] * s_vol_q8) >> 8);
+        buf[of * 2] = s;
+        buf[of * 2 + 1] = s;
+        of++;
+        s_up_phase += s_up_hz;
+        while (s_up_phase >= OUT_RATE && s_up_pos < s_up_n) {
+            s_up_phase -= OUT_RATE;
+            s_up_pos++;
+        }
+    }
+    bool done = (s_up_pos >= s_up_n);
+    if (done) s_up_pcm = NULL;
+    bool clip_playing = s_playing;
+    xSemaphoreGive(s_mtx);
+
+    if (of > 0) {
+        spk(true);
+        size_t wr;
+        i2s_channel_write(s_tx, buf, (size_t)of * 4, &wr, pdMS_TO_TICKS(40));
+    }
+    if (done && !clip_playing) spk(false);
+    return of > 0;
+}
