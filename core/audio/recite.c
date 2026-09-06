@@ -19,12 +19,6 @@ static const float BAND_HZ[3] = { 300.f, 900.f, 2200.f };
 // audio scores ~0). Deliberately generous — V1 flags, it doesn't grade.
 #define TH_GOOD    1.0f
 #define TH_UNSURE  1.8f
-// Silence floor: this far under the voiced level counts as "no voice there".
-// Anchored to BOTH the median and the peak — median alone collapses when the
-// take is mostly silence (median = the silence itself), peak alone is fooled
-// by one loud plosive. Speech sits within ~25dB of its own peak.
-#define SILENCE_DB 18.0f
-#define PEAK_RANGE_DB 30.0f
 
 typedef struct { float f[N_FEAT]; float raw_db; } Frame;
 
@@ -148,12 +142,18 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
     int rn = extract(ref, ref_n, ref_hz, rf);
     int un = extract(usr, usr_n, usr_hz, uf);
     if (rn < 2 || un < 2) { free(rf); return false; }
-    // Voiced floor from the 95th-percentile level, not the max — one loud
-    // plosive would otherwise push softer (but real) words under the floor.
-    float floor_med = percentile_db(uf, un, 50) - SILENCE_DB;
-    float floor_p95 = percentile_db(uf, un, 95) - PEAK_RANGE_DB;
-    float usr_floor = floor_med > floor_p95 ? floor_med : floor_p95;
-    znorm(rf, rn, percentile_db(rf, rn, 95) - PEAK_RANGE_DB);
+    // Voiced floor = just above the take's own NOISE floor (5th percentile),
+    // not relative to the voice level: mic auto-gain records the first word
+    // far quieter than the rest, and a voice-relative floor then reads that
+    // quiet-but-present word as silence ("not heard"). Guard for takes with
+    // no silence at all: stay at least 12dB under the p95 voice level.
+    float usr_floor = percentile_db(uf, un, 5) + 8.f;
+    float usr_cap = percentile_db(uf, un, 95) - 12.f;
+    if (usr_floor > usr_cap) usr_floor = usr_cap;
+    float ref_floor = percentile_db(rf, rn, 5) + 8.f;
+    float ref_cap = percentile_db(rf, rn, 95) - 12.f;
+    if (ref_floor > ref_cap) ref_floor = ref_cap;
+    znorm(rf, rn, ref_floor);
     znorm(uf, un, usr_floor);
 
     // DTW: cost[i][j] = best path cost aligning ref[0..i] with usr[0..j].
@@ -227,8 +227,13 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
         o->score = cnt ? (float)(sum / cnt) : 99.f;
         o->user_start_ms = (jb >= ja) ? (uint32_t)ja * FRAME_MS : 0;
         o->user_end_ms   = (jb >= ja) ? (uint32_t)(jb + 1) * FRAME_MS : 0;
-        // Missing = the mapped stretch is under 1/3 voice.
-        o->verdict = (cnt == 0 || span == 0 || voiced * 3 < span)
+        // Missing = the mapped stretch is mostly silence, OR it contains far
+        // less voiced time than the reference word runs (a skipped word gets
+        // its ref frames squeezed onto a sliver of neighboring audio — the
+        // temporal signature; tolerates up to ~4x-faster-than-ref delivery).
+        int min_voiced = (fb - fa + 1) / 4;
+        o->verdict = (cnt == 0 || span == 0 || voiced * 3 < span ||
+                      voiced < min_voiced)
                          ? RECITE_MISSING : RECITE_GOOD;   // grade below
     }
 

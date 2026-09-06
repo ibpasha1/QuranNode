@@ -69,10 +69,15 @@ static float s_level;           // live mic level 0..1 (recite view meter)
 // and scores it "not heard" — the V1 field bug.
 #define VOICE_PEAK      700       // s16 peak that counts as voice (~0.021 fs)
                                   // low on purpose: quiet mics/AGC — the
-                                  // scorer has its own take-relative floor
-#define VOICE_PREROLL   (MIC_HZ / 4)          // keep 250ms before first voice
-#define VOICE_TAILPAD   (MIC_HZ / 3)          // keep 330ms after last voice
-#define AUTO_STOP_MS    1600      // this much silence after voice = done
+                                  // scorer has its own noise-relative floor
+// Generous preroll: mic auto-gain ramps up over the first ~second, so the
+// first word may sit below VOICE_PEAK — keep plenty of lead-in so it stays
+// in the analyzed take (the scorer tolerates leading silence; a trimmed-off
+// first word can only score "not heard").
+#define VOICE_PREROLL   (MIC_HZ * 3 / 2)      // keep 1.5s before first voice
+#define VOICE_TAILPAD   (MIC_HZ / 2)          // keep 500ms after last voice
+#define AUTO_STOP_MS    2200      // this much silence after voice = done
+                                  // (learners pause mid-ayah; don't cut them)
 #define NO_VOICE_MS     12000     // never heard anything = give up
 static bool     s_heard;          // any voice yet this take
 static uint32_t s_voice_a, s_voice_b;   // first/last voiced sample bounds
