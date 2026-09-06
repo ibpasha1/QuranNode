@@ -608,7 +608,7 @@ static void on_render(Canvas *c)
         KeyChip k[4] = {
             { "OK", "LISTEN", 3, { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
             { "^v", "AYAH", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN, INPUT_ENC_CW, INPUT_ENC_CCW } },
-            { "MD", "TRAIN", 1, { INPUT_BTN_MODE } },
+            { ">", "TRAIN", 2, { INPUT_NAV_RIGHT, INPUT_BTN_MODE } },
             { "BK", "HOME", 1, { INPUT_BTN_BACK } },
         };
         theme_keybar(c, k, 4);
@@ -644,8 +644,8 @@ static void on_render(Canvas *c)
         KeyChip k[5] = {
             { "<>", "WORD", 4, { INPUT_NAV_LEFT, INPUT_NAV_RIGHT, INPUT_ENC_CW, INPUT_ENC_CCW } },
             { "OK", "TEACHER", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
-            { "PL", "YOU", 1, { INPUT_BTN_PLAY } },
-            { "MD", "RETRY", 1, { INPUT_BTN_MODE } },
+            { "^", "YOU", 2, { INPUT_NAV_UP, INPUT_BTN_PLAY } },
+            { "v", "RETRY", 2, { INPUT_NAV_DOWN, INPUT_BTN_MODE } },
             { "BK", "DONE", 1, { INPUT_BTN_BACK } },
         };
         theme_keybar(c, k, 5);
@@ -687,7 +687,10 @@ static void on_input(InputEvent e)
             hal_audio_click(true); start_listen(); break;
         case INPUT_NAV_UP: case INPUT_ENC_CCW: change_ayah(-1); break;
         case INPUT_NAV_DOWN: case INPUT_ENC_CW: change_ayah(+1); break;
-        case INPUT_BTN_MODE:   // enter training capture
+        // RIGHT enters training capture: the device's only physical control
+        // is the 5-way (MODE/PLAY exist only as serial-monitor keys).
+        case INPUT_NAV_RIGHT:
+        case INPUT_BTN_MODE:
             hal_audio_click(true);
             s_train = 0;
             s_ready_hint = NULL;
@@ -743,14 +746,16 @@ static void on_input(InputEvent e)
 
     case TEA_REVIEW:
         switch (e.type) {
-        // Reading order is right-to-left on screen; LEFT = next word feels
-        // natural against the Arabic, but keep it simple: LEFT/CCW = previous.
+        // 5-way-only friendly: <> = word, OK = teacher, UP = your own take,
+        // DOWN = retry. (PLAY/MODE still work from the sim/serial keys.)
         case INPUT_NAV_LEFT: case INPUT_ENC_CCW: review_move(-1); break;
         case INPUT_NAV_RIGHT: case INPUT_ENC_CW: review_move(+1); break;
         case INPUT_NAV_SELECT: case INPUT_ENC_PUSH:
             hal_audio_click(true); play_teacher_word(); break;
+        case INPUT_NAV_UP:
         case INPUT_BTN_PLAY:
             hal_audio_click(true); play_user_word(); break;
+        case INPUT_NAV_DOWN:
         case INPUT_BTN_MODE:
             hal_audio_click(true); start_listen(); break;   // full retry
         case INPUT_BTN_BACK:
