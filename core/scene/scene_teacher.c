@@ -189,6 +189,15 @@ static void run_analysis(void)
         for (int i = 0; i < s_nwords; i++)
             s_words[i] = (ReciteWord){ RECITE_MISSING, 99.f, 0, 0 };
 
+    QN_LOGI("TEACHER", "analyze %d:%d ok=%d ref=%ums@%u take=%ums (rec=%ums voiced=[%u..%u]ms)",
+            s_surah, s_ayah, ok, s_ref_hz ? s_ref_n / (s_ref_hz / 1000) : 0, s_ref_hz,
+            (b - a) / (MIC_HZ / 1000), s_rec_n / (MIC_HZ / 1000),
+            s_voice_a / (MIC_HZ / 1000), s_voice_b / (MIC_HZ / 1000));
+    for (int i = 0; i < s_nwords; i++)
+        QN_LOGI("TEACHER", "  word %d: verdict=%d score=%.2f user=[%u..%u]ms",
+                i, s_words[i].verdict, s_words[i].score,
+                s_words[i].user_start_ms, s_words[i].user_end_ms);
+
     // Jump the review cursor to the first word needing attention.
     s_sel_word = 0;
     for (int i = 0; i < s_nwords; i++)

@@ -241,9 +241,13 @@ extern "C" bool hal_mic_start(uint32_t hz)
     want.channels = 1;
     want.samples = 1024;
     want.callback = nullptr;   // queue (pull) mode
-    g_mic_dev = SDL_OpenAudioDevice(nullptr, 1 /*capture*/, &want, &have,
-                                    SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+    // allowed_changes MUST be 0: the OS mic runs at 44.1/48k, and with
+    // FREQUENCY_CHANGE allowed SDL hands us that raw rate while the caller
+    // assumes `hz` — timestamps 3x fast, silence auto-stop firing mid-
+    // recitation, words "not heard". 0 makes SDL resample to `hz` for us.
+    g_mic_dev = SDL_OpenAudioDevice(nullptr, 1 /*capture*/, &want, &have, 0);
     if (!g_mic_dev) return false;
+    fprintf(stderr, "[mic] capture open: %d Hz, %d ch\n", have.freq, have.channels);
     SDL_PauseAudioDevice(g_mic_dev, 0);
     return true;
 }
