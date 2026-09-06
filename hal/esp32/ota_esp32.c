@@ -9,6 +9,7 @@
 //
 // Wi-Fi credentials come from -DWIFI_SSID / -DWIFI_PASS (platformio.ini).
 #include "ota.h"
+#include "hal.h"
 
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -104,6 +105,65 @@ static esp_err_t update_post(httpd_req_t *req)
     vTaskDelay(pdMS_TO_TICKS(800));
     esp_restart();
     return ESP_OK;
+}
+
+// --- Remote recitation scoring (Quran Teacher V2) ---------------------------
+// POSTs the take to TEACHER_URL (secrets.ini) and parses the CSV verdicts.
+// No TEACHER_URL configured -> permanent 0 (pure-offline device).
+static bool wifi_up(int timeout_ms);   // defined below with the OTA machinery
+static const char *verdict_names[] = { "GOOD", "UNSURE", "MISMATCH", "MISSING", "UNCLEAR" };
+
+int hal_score_remote(const uint8_t *wav, uint32_t wav_len, int surah, int ayah,
+                     RemoteWord *out, int max_words)
+{
+#ifndef TEACHER_URL
+    (void)wav; (void)wav_len; (void)surah; (void)ayah; (void)out; (void)max_words;
+    return 0;
+#else
+    if (!wifi_up(8000)) return 0;
+
+    char url[160];
+    snprintf(url, sizeof(url), "%s/score?surah=%d&ayah=%d", TEACHER_URL, surah, ayah);
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 12000,
+    };
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) return 0;
+    esp_http_client_set_header(h, "Content-Type", "audio/wav");
+
+    static char resp[2048];
+    int n = 0;
+    if (esp_http_client_open(h, (int)wav_len) == ESP_OK) {
+        if (esp_http_client_write(h, (const char *)wav, (int)wav_len) == (int)wav_len &&
+            esp_http_client_fetch_headers(h) >= 0 &&
+            esp_http_client_get_status_code(h) == 200) {
+            int got = esp_http_client_read_response(h, resp, sizeof(resp) - 1);
+            if (got > 0) {
+                resp[got] = 0;
+                // Parse "word,VERDICT,score,start,end" rows.
+                for (char *line = strtok(resp, "\n"); line && n < max_words;
+                     line = strtok(NULL, "\n")) {
+                    if (line[0] == '#' || line[0] == 'w') continue;   // comment/header
+                    int wi; char vs[12]; float sc; unsigned a, b;
+                    if (sscanf(line, "%d,%11[^,],%f,%u,%u", &wi, vs, &sc, &a, &b) == 5) {
+                        uint8_t v = 4;
+                        for (uint8_t k = 0; k < 5; k++)
+                            if (!strcmp(vs, verdict_names[k])) { v = k; break; }
+                        out[n++] = (RemoteWord){ v, sc, a, b };
+                    }
+                }
+                ESP_LOGI(TAG, "remote score %d:%d -> %d words", surah, ayah, n);
+            }
+        } else {
+            ESP_LOGW(TAG, "remote score failed (status %d)",
+                     esp_http_client_get_status_code(h));
+        }
+    }
+    esp_http_client_cleanup(h);
+    return n;
+#endif
 }
 
 // --- In-RAM blob downloads (/takes) ---------------------------------------

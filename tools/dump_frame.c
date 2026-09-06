@@ -165,6 +165,10 @@ int hal_tz_offset_min(void){ return -240; }
 static bool s_dump_ota;
 void hal_serve_blob(int idx, const char *name, const void *data, size_t len)
 { (void)idx; (void)name; (void)data; (void)len; }
+int hal_score_remote(const uint8_t *wav, uint32_t wav_len, int surah, int ayah,
+                     RemoteWord *out, int max_words)
+{ (void)wav; (void)wav_len; (void)surah; (void)ayah; (void)out; (void)max_words;
+  return 0; }   // headless flows always exercise the local engine
 void hal_ota_start(void){ s_dump_ota = true; }
 const char *hal_ota_url(void){ return s_dump_ota ? "http://192.168.86.20/" : NULL; }
 void hal_ota_pull(void){ s_dump_ota = true; }

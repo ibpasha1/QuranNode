@@ -235,6 +235,12 @@ void hal_audio_click(bool accent) { (void)accent; }
 static i2s_chan_handle_t s_rx;
 static bool s_mic_ok;
 
+// 90Hz one-pole high-pass on the mic stream: spectral analysis of field
+// takes showed 0-100Hz rumble AS LOUD AS THE VOICE (mic self-noise +
+// vibration) — it skews the endpointer, the local features, and the ASR.
+// alpha = fs/(fs + 2*pi*fc) at 16k/90Hz ~= 0.9659 -> Q15 31652.
+static int32_t s_hp_x, s_hp_y;
+
 bool hal_mic_start(uint32_t hz)
 {
     if (s_mic_ok) return true;
@@ -253,6 +259,7 @@ bool hal_mic_start(uint32_t hz)
         i2s_del_channel(s_rx); s_rx = NULL; return false;
     }
     s_mic_ok = true;
+    s_hp_x = s_hp_y = 0;   // reset the high-pass state per session
     ESP_LOGI(TAG, "INMP441 mic started %uHz (SCK%d WS%d SD%d)",
              (unsigned)hz, PIN_MIC_SCK, PIN_MIC_WS, PIN_MIC_SD);
     return true;
@@ -267,8 +274,13 @@ int hal_mic_read(int16_t *buf, int max_samples)
     if (i2s_channel_read(s_rx, raw, (size_t)want * sizeof(int32_t), &got, 0) != ESP_OK)
         return 0;   // nothing ready yet
     int n = (int)(got / sizeof(int32_t));
-    for (int i = 0; i < n; i++)
-        buf[i] = (int16_t)(raw[i] >> 13);   // 24-bit MSB-aligned -> int16 + gain (tune >>11..16)
+    for (int i = 0; i < n; i++) {
+        int32_t x = raw[i] >> 13;   // 24-bit MSB-aligned -> int16 range + gain
+        int32_t y = (int32_t)(((int64_t)31652 * (s_hp_y + x - s_hp_x)) >> 15);
+        s_hp_x = x;
+        s_hp_y = y;
+        buf[i] = sat16(y);
+    }
     return n;
 }
 

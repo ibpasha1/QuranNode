@@ -275,6 +275,74 @@ bool hal_state_load(const char *name, void *buf, size_t cap, size_t *out_len)
 
 // --- OTA (no real update path in the sim; return a demo URL so the Settings
 //     "Update firmware" screen previews correctly) --------------------------
+// --- Remote scoring (Quran Teacher V2) — plain HTTP over BSD sockets -------
+// Server URL from QN_TEACHER_URL (default: local server/app.py). Only
+// http://host:port is supported — it's a LAN protocol.
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+int hal_score_remote(const uint8_t *wav, uint32_t wav_len, int surah, int ayah,
+                     RemoteWord *out, int max_words)
+{
+    const char *url = getenv("QN_TEACHER_URL");
+    if (!url) url = "http://127.0.0.1:8090";
+    char host[128] = {0}, port[8] = "80";
+    if (sscanf(url, "http://%127[^:/]:%7[0-9]", host, port) < 1) return 0;
+
+    struct addrinfo hints = { .ai_socktype = SOCK_STREAM }, *ai;
+    if (getaddrinfo(host, port, &hints, &ai) != 0) return 0;
+    int fd = socket(ai->ai_family, ai->ai_socktype, 0);
+    struct timeval tv = { .tv_sec = 15 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    if (connect(fd, ai->ai_addr, ai->ai_addrlen) != 0) {
+        freeaddrinfo(ai); close(fd); return 0;
+    }
+    freeaddrinfo(ai);
+
+    char hdr[256];
+    int hl = snprintf(hdr, sizeof(hdr),
+                      "POST /score?surah=%d&ayah=%d HTTP/1.1\r\n"
+                      "Host: %s\r\nContent-Type: audio/wav\r\n"
+                      "Content-Length: %u\r\nConnection: close\r\n\r\n",
+                      surah, ayah, host, wav_len);
+    bool ok = write(fd, hdr, hl) == hl;
+    for (uint32_t off = 0; ok && off < wav_len; ) {
+        ssize_t w = write(fd, wav + off, wav_len - off);
+        if (w <= 0) { ok = false; break; }
+        off += (uint32_t)w;
+    }
+    static char resp[4096];
+    int rlen = 0;
+    while (ok && rlen < (int)sizeof(resp) - 1) {
+        ssize_t r = read(fd, resp + rlen, sizeof(resp) - 1 - rlen);
+        if (r <= 0) break;
+        rlen += (int)r;
+    }
+    close(fd);
+    resp[rlen] = 0;
+    if (!ok || !strstr(resp, " 200 ")) return 0;
+    char *body = strstr(resp, "\r\n\r\n");
+    if (!body) return 0;
+    body += 4;
+
+    static const char *VN[] = { "GOOD", "UNSURE", "MISMATCH", "MISSING", "UNCLEAR" };
+    int n = 0;
+    for (char *line = strtok(body, "\n"); line && n < max_words;
+         line = strtok(NULL, "\n")) {
+        if (line[0] == '#' || line[0] == 'w' || line[0] == '\r') continue;
+        int wi; char vs[12]; float sc; unsigned a, b;
+        if (sscanf(line, "%d,%11[^,],%f,%u,%u", &wi, vs, &sc, &a, &b) == 5) {
+            uint8_t v = 4;
+            for (uint8_t k = 0; k < 5; k++)
+                if (!strcmp(vs, VN[k])) { v = k; break; }
+            out[n++] = (RemoteWord){ v, sc, a, b };
+        }
+    }
+    fprintf(stderr, "[teacher] remote score %d:%d -> %d words\n", surah, ayah, n);
+    return n;
+}
+
 static bool s_sim_ota = false;
 void hal_serve_blob(int idx, const char *name, const void *data, size_t len)
 { (void)idx; (void)name; (void)data; (void)len; }   // sim SD works; not needed

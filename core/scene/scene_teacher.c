@@ -99,6 +99,7 @@ static uint32_t s_ref_n, s_ref_hz;
 
 static ReciteWord s_words[MAX_WORDS];
 static int  s_nwords;
+static bool s_online;           // last analysis came from the scoring server
 static int  s_sel_word;         // selected word in review (reading order)
 static uint32_t s_seg_stop_ms;  // stop teacher playback at this clip pos (0=off)
 static float s_level;           // live mic level 0..1 (recite view meter)
@@ -216,6 +217,23 @@ static void start_recite(void)
     s_state = TEA_RECITE;
 }
 
+// 44-byte canonical WAV header for 16k mono s16 PCM of `bytes` length.
+static void wav_header(uint8_t *d, uint32_t bytes)
+{
+    memcpy(d, "RIFF", 4);
+    uint32_t v = 36 + bytes;           memcpy(d + 4, &v, 4);
+    memcpy(d + 8, "WAVEfmt ", 8);
+    v = 16;                            memcpy(d + 16, &v, 4);
+    uint16_t h = 1;                    memcpy(d + 20, &h, 2);   // PCM
+    h = 1;                             memcpy(d + 22, &h, 2);   // mono
+    v = MIC_HZ;                        memcpy(d + 24, &v, 4);
+    v = MIC_HZ * 2;                    memcpy(d + 28, &v, 4);
+    h = 2;                             memcpy(d + 32, &h, 2);
+    h = 16;                            memcpy(d + 34, &h, 2);
+    memcpy(d + 36, "data", 4);
+    memcpy(d + 40, &bytes, 4);
+}
+
 // Save the whole (untrimmed) take as a 16k mono WAV named by take + label —
 // untrimmed on purpose: offline tuning can then re-run endpointing too.
 static void train_save_take(void)
@@ -228,18 +246,7 @@ static void train_save_take(void)
     uint32_t bytes = s_rec_n * sizeof(int16_t);
     uint8_t *raw = (uint8_t *)s_rec;
     memmove(raw + 44, raw, bytes);
-    memcpy(raw, "RIFF", 4);
-    uint32_t v = 36 + bytes;           memcpy(raw + 4, &v, 4);
-    memcpy(raw + 8, "WAVEfmt ", 8);
-    v = 16;                            memcpy(raw + 16, &v, 4);
-    uint16_t h = 1;                    memcpy(raw + 20, &h, 2);   // PCM
-    h = 1;                             memcpy(raw + 22, &h, 2);   // mono
-    v = MIC_HZ;                        memcpy(raw + 24, &v, 4);
-    v = MIC_HZ * 2;                    memcpy(raw + 28, &v, 4);
-    h = 2;                             memcpy(raw + 32, &h, 2);
-    h = 16;                            memcpy(raw + 34, &h, 2);
-    memcpy(raw + 36, "data", 4);
-    memcpy(raw + 40, &bytes, 4);
+    wav_header(raw, bytes);
     // Keep a RAM copy regardless of the SD outcome — downloadable over
     // Wi-Fi (LEFT on the training screen), and re-registered live if
     // sharing is already on.
@@ -351,6 +358,36 @@ static void run_analysis(void)
     if (!ok)
         for (int i = 0; i < s_nwords; i++)
             s_words[i] = (ReciteWord){ RECITE_MISSING, 99.f, 0, 0 };
+
+    // V2: ask the scoring server for word-level verdicts (it transcribes the
+    // take and compares words to the canonical text — content, not acoustics;
+    // docs/TEACHER_V2.md). On success its verdicts REPLACE the local ones;
+    // the local spans are kept for per-word replay until the server sends
+    // timestamps (M3). Offline / no server -> the local verdicts stand.
+    s_online = false;
+    if (b > a) {
+        uint32_t pcm_bytes = (b - a) * sizeof(int16_t);
+        uint8_t *wav = malloc(44 + pcm_bytes);
+        if (wav) {
+            wav_header(wav, pcm_bytes);
+            memcpy(wav + 44, s_rec + a, pcm_bytes);
+            RemoteWord rw[MAX_WORDS];
+            int rn = hal_score_remote(wav, 44 + pcm_bytes, s_surah, s_ayah,
+                                      rw, MAX_WORDS);
+            free(wav);
+            if (rn == s_nwords) {
+                for (int i = 0; i < s_nwords; i++) {
+                    s_words[i].verdict = (ReciteVerdict)rw[i].verdict;
+                    s_words[i].score = 1.f - rw[i].score;   // similarity -> distance-ish
+                    if (rw[i].end_ms > rw[i].start_ms) {
+                        s_words[i].user_start_ms = rw[i].start_ms;
+                        s_words[i].user_end_ms = rw[i].end_ms;
+                    }
+                }
+                s_online = true;
+            }
+        }
+    }
 
     QN_LOGI("TEACHER", "analyze %d:%d ok=%d ref=%ums@%u take=%ums (rec=%ums voiced=[%u..%u]ms)",
             s_surah, s_ayah, ok, s_ref_hz ? s_ref_n / (s_ref_hz / 1000) : 0, s_ref_hz,
@@ -656,7 +693,12 @@ static void on_render(Canvas *c)
         font_draw_string(c, 44, py + 26, &font_tiny, line,
                          verdict_color(w->verdict));
         font_draw_string(c, 12, py + 44, &font_tiny,
-                         "similarity only - not a tajweed judgement", THEME_DIM);
+                         s_online ? "scored by teacher server"
+                                  : "similarity only - offline estimate",
+                         THEME_DIM);
+        font_draw_string_right(c, CANVAS_WIDTH - 12, py + 44, &font_tiny,
+                               s_online ? "online" : "offline",
+                               s_online ? THEME_ACTIVE : THEME_DIM);
         break;
     }
     }

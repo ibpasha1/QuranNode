@@ -121,6 +121,21 @@ bool hal_pcm_is_playing(void);
 void        hal_ota_start(void);
 const char *hal_ota_url(void);
 
+// --- Remote recitation scoring (Quran Teacher V2; docs/TEACHER_V2.md) ------
+// POST a WAV take to the configured scoring server and parse its per-word
+// CSV verdicts. verdict values follow ReciteVerdict order: 0=GOOD 1=UNSURE
+// 2=MISMATCH 3=MISSING 4=UNCLEAR. Returns the number of words scored, or 0
+// when unavailable (no server configured / offline / timeout / bad reply) —
+// the caller falls back to the local engine. Blocks up to ~12s.
+typedef struct {
+    uint8_t  verdict;
+    float    score;
+    uint32_t start_ms, end_ms;   // 0,0 until the server sends timestamps (M3)
+} RemoteWord;
+
+int hal_score_remote(const uint8_t *wav, uint32_t wav_len, int surah, int ayah,
+                     RemoteWord *out, int max_words);
+
 // Register an in-RAM blob for the OTA web server to list at /takes and serve
 // at /takes/<idx> (training-take download when the SD card is unreliable).
 // The memory stays owned by the caller and must outlive the registration;

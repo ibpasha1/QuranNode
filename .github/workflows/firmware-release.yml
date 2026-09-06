@@ -37,13 +37,18 @@ jobs:
         env:
           WIFI_SSID: ${{ secrets.WIFI_SSID }}
           WIFI_PASS: ${{ secrets.WIFI_PASS }}
+          TEACHER_URL: ${{ secrets.TEACHER_URL }}
         run: |
           cat > firmware/secrets.ini <<EOF
           [secrets]
           wifi =
               '-DWIFI_SSID="${WIFI_SSID}"'
               '-DWIFI_PASS="${WIFI_PASS}"'
+          teacher =
           EOF
+          if [ -n "$TEACHER_URL" ]; then
+            echo "    '-DTEACHER_URL=\"${TEACHER_URL}\"'" >> firmware/secrets.ini
+          fi
 
       # The no-SD fallback (emb_*.c) is committed, so no asset generation needed here.
       - name: Stamp FW_VERSION with the git tag
