@@ -225,16 +225,21 @@ static void train_save_take(void)
     h = 16;                            memcpy(raw + 34, &h, 2);
     memcpy(raw + 36, "data", 4);
     memcpy(raw + 40, &bytes, 4);
-    bool ok = hal_state_save(name, raw, 44 + bytes);
+    // SD cards throw transient write errors on long bursts (field log:
+    // sdmmc r2=0x2000 on take 5 of 20) — retry a few times before giving
+    // up, and on real failure KEEP the session on this take so the user
+    // just re-records it instead of losing the run.
+    bool ok = false;
+    for (int try = 0; try < 3 && !ok; try++)
+        ok = hal_state_save(name, raw, 44 + bytes);
     QN_LOGI("TEACHER", "train take %d (%s): %ums -> state/%s %s",
             s_train + 1, tag, s_rec_n / (MIC_HZ / 1000), name,
-            ok ? "saved" : "SAVE FAILED");
+            ok ? "saved" : "SAVE FAILED (3 tries)");
     s_rec_n = 0;   // buffer content was shifted; recording is consumed
 
     if (!ok) {
-        s_ready_hint = "SD write failed";
-        s_train = -1;
-        s_state = TEA_READY;
+        s_ready_hint = "Save failed - OK to re-record this take";
+        s_state = TEA_TRAIN;   // same take; session continues
         return;
     }
     if (++s_train >= TRAIN_TOTAL) {

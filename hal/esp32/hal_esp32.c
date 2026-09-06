@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
 
@@ -425,9 +426,24 @@ bool hal_state_save(const char *name, const void *data, size_t len)
     char path[300]; snprintf(path, sizeof(path), "/sdcard/state/%s", name);
     FILE *f = fopen(path, "wb");
     if (!f) return false;
-    size_t w = fwrite(data, 1, len, f);
+    // Chunked writes: big single fwrites (training WAVs run 100-300KB)
+    // become long multi-block SD DMA bursts that some cards abort with a
+    // transient status error (field log: r2=0x2000 mid-session). 16KB
+    // chunks with a breather keep bursts short; on failure remove the
+    // partial file so the caller's retry starts clean.
+    const uint8_t *p = data;
+    size_t left = len;
+    bool ok = true;
+    while (left > 0) {
+        size_t chunk = left > 16384 ? 16384 : left;
+        if (fwrite(p, 1, chunk, f) != chunk) { ok = false; break; }
+        p += chunk;
+        left -= chunk;
+        if (left > 0) vTaskDelay(1);
+    }
     fclose(f);
-    return w == len;
+    if (!ok) unlink(path);
+    return ok;
 }
 
 bool hal_state_load(const char *name, void *buf, size_t cap, size_t *out_len)
