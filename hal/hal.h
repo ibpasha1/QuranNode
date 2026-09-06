@@ -121,6 +121,12 @@ bool hal_pcm_is_playing(void);
 void        hal_ota_start(void);
 const char *hal_ota_url(void);
 
+// Register an in-RAM blob for the OTA web server to list at /takes and serve
+// at /takes/<idx> (training-take download when the SD card is unreliable).
+// The memory stays owned by the caller and must outlive the registration;
+// data=NULL clears the slot. No-op off-device.
+void        hal_serve_blob(int idx, const char *name, const void *data, size_t len);
+
 // Pull the latest firmware from the configured GitHub release over HTTPS and
 // self-flash (the field-update path). Also brings Wi-Fi up so the local push
 // URL still works as a fallback. hal_ota_status() reports progress for the UI.

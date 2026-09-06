@@ -61,6 +61,12 @@ static const struct { const char *label; const char *tag; int count; } TRAIN[] =
 #define TRAIN_TOTAL  20
 static int s_train = -1;   // -1 = practice mode; else take index 0..TOTAL-1
 
+// Every take is also kept in RAM (PSRAM has room) and can be served over the
+// OTA web server at http://<ip>/takes — the field SD card fails persistently
+// on fresh-cluster writes, and the takes only need to reach the host once.
+static struct { void *wav; uint32_t len; char name[40]; } s_kept[TRAIN_TOTAL];
+static bool s_share;       // Wi-Fi sharing started this session
+
 static void train_label(int take, const char **label, char *tag, int tagsz)
 {
     int acc = 0;
@@ -164,6 +170,15 @@ static void on_leave(void)
     hal_mic_stop();
     hal_pcm_stop();
     s_train = -1;
+    // Free the RAM takes and unregister them from the web server (dangling
+    // pointers otherwise). Downloads happen while the teacher stays open.
+    for (int i = 0; i < TRAIN_TOTAL; i++) {
+        hal_serve_blob(i, NULL, NULL, 0);
+        free(s_kept[i].wav);
+        s_kept[i].wav = NULL;
+        s_kept[i].len = 0;
+    }
+    s_share = false;
     if (s_clip) { hal_audio_close(s_clip); s_clip = NULL; }
     if (s_timing_ok) { timing_close(&s_timing); s_timing_ok = false; }
     // Keep s_rec/s_ref/pack resident: re-entry is common, sim/PSRAM have room.
@@ -225,23 +240,37 @@ static void train_save_take(void)
     h = 16;                            memcpy(raw + 34, &h, 2);
     memcpy(raw + 36, "data", 4);
     memcpy(raw + 40, &bytes, 4);
+    // Keep a RAM copy regardless of the SD outcome — downloadable over
+    // Wi-Fi (LEFT on the training screen), and re-registered live if
+    // sharing is already on.
+    free(s_kept[s_train].wav);
+    s_kept[s_train].wav = malloc(44 + bytes);
+    if (s_kept[s_train].wav) {
+        memcpy(s_kept[s_train].wav, raw, 44 + bytes);
+        s_kept[s_train].len = 44 + bytes;
+        snprintf(s_kept[s_train].name, sizeof(s_kept[s_train].name), "%s", name);
+        if (s_share)
+            hal_serve_blob(s_train, name, s_kept[s_train].wav, 44 + bytes);
+    }
+
     // SD cards throw transient write errors on long bursts (field log:
-    // sdmmc r2=0x2000 on take 5 of 20) — retry a few times before giving
-    // up, and on real failure KEEP the session on this take so the user
-    // just re-records it instead of losing the run.
+    // sdmmc r2=0x2000 on take 5 of 20) — retry a few times; with the RAM
+    // copy held, an SD failure no longer blocks the session at all.
     bool ok = false;
     for (int try = 0; try < 3 && !ok; try++)
         ok = hal_state_save(name, raw, 44 + bytes);
-    QN_LOGI("TEACHER", "train take %d (%s): %ums -> state/%s %s",
+    QN_LOGI("TEACHER", "train take %d (%s): %ums -> state/%s %s%s",
             s_train + 1, tag, s_rec_n / (MIC_HZ / 1000), name,
-            ok ? "saved" : "SAVE FAILED (3 tries)");
+            ok ? "saved" : "SD FAILED (3 tries)",
+            s_kept[s_train].wav ? " [in RAM]" : "");
     s_rec_n = 0;   // buffer content was shifted; recording is consumed
 
-    if (!ok) {
+    if (!ok && !s_kept[s_train].wav) {   // nowhere at all — redo the take
         s_ready_hint = "Save failed - OK to re-record this take";
-        s_state = TEA_TRAIN;   // same take; session continues
+        s_state = TEA_TRAIN;
         return;
     }
+    if (!ok) s_ready_hint = "SD failed - kept in RAM (< = wifi)";
     if (++s_train >= TRAIN_TOTAL) {
         s_train = -1;
         s_ready_hint = "20 takes saved: state/train_*.wav";
@@ -559,14 +588,21 @@ static void on_render(Canvas *c)
         int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 64;
         const char *label; char tag[16];
         train_label(s_train, &label, tag, sizeof(tag));
-        char t[32];
+        char t[48];
         snprintf(t, sizeof(t), "TRAINING  %d / %d", s_train + 1, TRAIN_TOTAL);
         font_draw_string_centered(c, iy, &font_small, t, THEME_TITLE);
         font_draw_string_centered(c, iy + 20, &font_small, label, THEME_TEXT);
-        font_draw_string_centered(c, iy + 40, &font_tiny,
-                                  s_ready_hint ? s_ready_hint
-                                               : "OK records - it saves and moves on",
-                                  s_ready_hint ? THEME_BADGE : THEME_DIM);
+        if (s_share) {   // Wi-Fi sharing line takes priority: show the URL
+            const char *url = hal_ota_url();
+            snprintf(t, sizeof(t), "%stakes  <- download here",
+                     url ? url : "wifi connecting... ");
+            font_draw_string_centered(c, iy + 40, &font_tiny, t, THEME_ACTIVE);
+        } else {
+            font_draw_string_centered(c, iy + 40, &font_tiny,
+                                      s_ready_hint ? s_ready_hint
+                                                   : "OK records - it saves and moves on",
+                                      s_ready_hint ? THEME_BADGE : THEME_DIM);
+        }
         break;
     }
 
@@ -620,12 +656,13 @@ static void on_render(Canvas *c)
         break;
     }
     case TEA_TRAIN: {
-        KeyChip k[3] = {
+        KeyChip k[4] = {
             { "OK", "RECORD", 3, { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
             { "^v", "SKIP/REDO", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN, INPUT_ENC_CW, INPUT_ENC_CCW } },
+            { "<", "WIFI", 1, { INPUT_NAV_LEFT } },
             { "BK", "EXIT", 1, { INPUT_BTN_BACK } },
         };
-        theme_keybar(c, k, 3);
+        theme_keybar(c, k, 4);
         break;
     }
     case TEA_LISTEN: {
@@ -717,6 +754,15 @@ static void on_input(InputEvent e)
         case INPUT_NAV_DOWN: case INPUT_ENC_CW:
             if (s_train < TRAIN_TOTAL - 1) { s_train++; hal_audio_click(false); }
             s_ready_hint = NULL;
+            break;
+        case INPUT_NAV_LEFT:   // share the RAM takes over Wi-Fi
+            hal_audio_click(true);
+            for (int i = 0; i < TRAIN_TOTAL; i++)
+                if (s_kept[i].wav)
+                    hal_serve_blob(i, s_kept[i].name, s_kept[i].wav,
+                                   s_kept[i].len);
+            hal_ota_start();   // blocks a few seconds while Wi-Fi joins
+            s_share = true;
             break;
         case INPUT_BTN_BACK:
             s_train = -1;

@@ -163,6 +163,8 @@ bool hal_pcm_is_playing(void) { return false; }
 int64_t hal_wall_clock(void){ return 1788537600; }
 int hal_tz_offset_min(void){ return -240; }
 static bool s_dump_ota;
+void hal_serve_blob(int idx, const char *name, const void *data, size_t len)
+{ (void)idx; (void)name; (void)data; (void)len; }
 void hal_ota_start(void){ s_dump_ota = true; }
 const char *hal_ota_url(void){ return s_dump_ota ? "http://192.168.86.20/" : NULL; }
 void hal_ota_pull(void){ s_dump_ota = true; }

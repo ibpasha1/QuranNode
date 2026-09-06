@@ -276,6 +276,8 @@ bool hal_state_load(const char *name, void *buf, size_t cap, size_t *out_len)
 // --- OTA (no real update path in the sim; return a demo URL so the Settings
 //     "Update firmware" screen previews correctly) --------------------------
 static bool s_sim_ota = false;
+void hal_serve_blob(int idx, const char *name, const void *data, size_t len)
+{ (void)idx; (void)name; (void)data; (void)len; }   // sim SD works; not needed
 void hal_ota_start(void) { s_sim_ota = true; printf("[sim] OTA update mode (no-op)\n"); }
 const char *hal_ota_url(void) { return s_sim_ota ? "http://192.168.86.20/" : NULL; }
 void hal_ota_pull(void) { s_sim_ota = true; printf("[sim] OTA pull from GitHub (no-op)\n"); }

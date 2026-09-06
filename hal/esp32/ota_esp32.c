@@ -106,6 +106,56 @@ static esp_err_t update_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+// --- In-RAM blob downloads (/takes) ---------------------------------------
+// Training takes live in PSRAM and download over Wi-Fi — the SD-card write
+// path proved unreliable on some cards (persistent r2=0x2000 on fresh
+// clusters), and the takes only need to reach the host once.
+#define BLOB_MAX 24
+static struct { const void *data; size_t len; char name[40]; } s_blobs[BLOB_MAX];
+
+void hal_serve_blob(int idx, const char *name, const void *data, size_t len)
+{
+    if (idx < 0 || idx >= BLOB_MAX) return;
+    s_blobs[idx].data = data;
+    s_blobs[idx].len = data ? len : 0;
+    snprintf(s_blobs[idx].name, sizeof(s_blobs[idx].name), "%s",
+             (data && name) ? name : "");
+}
+
+static esp_err_t takes_get(httpd_req_t *req)
+{
+    const char *p = strrchr(req->uri, '/');
+    if (p && p[1] >= '0' && p[1] <= '9') {          // /takes/<idx>
+        int i = atoi(p + 1);
+        if (i < 0 || i >= BLOB_MAX || !s_blobs[i].data) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such take");
+            return ESP_FAIL;
+        }
+        char cd[64];
+        snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", s_blobs[i].name);
+        httpd_resp_set_type(req, "audio/wav");
+        httpd_resp_set_hdr(req, "Content-Disposition", cd);
+        return httpd_resp_send(req, s_blobs[i].data, s_blobs[i].len);
+    }
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_sendstr_chunk(req, "<h2>Training takes</h2><ul>");
+    char line[128];
+    int n = 0;
+    for (int i = 0; i < BLOB_MAX; i++) {
+        if (!s_blobs[i].data) continue;
+        snprintf(line, sizeof(line),
+                 "<li><a href=\"/takes/%d\" download>%s</a> (%u KB)</li>",
+                 i, s_blobs[i].name, (unsigned)(s_blobs[i].len / 1024));
+        httpd_resp_sendstr_chunk(req, line);
+        n++;
+    }
+    if (!n) httpd_resp_sendstr_chunk(req, "<li>none yet</li>");
+    httpd_resp_sendstr_chunk(req,
+        "</ul><p>curl -OJ http://this-ip/takes/N &nbsp;(per file)</p>");
+    httpd_resp_sendstr_chunk(req, NULL);
+    return ESP_OK;
+}
+
 static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -160,11 +210,14 @@ bool ota_start(void)
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size = 8192;
     hc.lru_purge_enable = true;
+    hc.uri_match_fn = httpd_uri_match_wildcard;   // for /takes/*
     if (httpd_start(&s_server, &hc) == ESP_OK) {
         httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = root_get };
         httpd_uri_t upd  = { .uri = "/update", .method = HTTP_POST, .handler = update_post };
+        httpd_uri_t tks  = { .uri = "/takes*", .method = HTTP_GET, .handler = takes_get };
         httpd_register_uri_handler(s_server, &root);
         httpd_register_uri_handler(s_server, &upd);
+        httpd_register_uri_handler(s_server, &tks);
     } else {
         ESP_LOGE(TAG, "http server failed to start");
     }
