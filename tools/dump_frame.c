@@ -140,15 +140,18 @@ bool hal_mic_start(uint32_t hz) { (void)hz; s_mic_on = true; s_mic_pos = 0; retu
 void hal_mic_stop(void) { s_mic_on = false; }
 int hal_mic_read(int16_t *buf, int max_samples)
 {
-    // Emit the synthetic signal in real-time-ish chunks (33ms per tick),
-    // going silent after 8s — the "recitation" ends and the scene's voice
-    // endpointer must auto-finish without any button press.
+    // Emit the synthetic signal in real-time-ish chunks (33ms per tick):
+    // 250ms of silence first (the scene's mic-warmup discard consumes it,
+    // keeping the signal aligned with the reference), then 8s of "voice",
+    // then silence — the endpointer must auto-finish without a button.
     if (!s_mic_on) return -1;
     int n = SYN_HZ * 33 / 1000;
     if (n > max_samples) n = max_samples;
-    uint64_t end = (uint64_t)8 * SYN_HZ;
-    for (int i = 0; i < n; i++)
-        buf[i] = (s_mic_pos + i < end) ? syn_sample(s_mic_pos + i) : 0;
+    uint64_t warm = SYN_HZ / 4, end = warm + (uint64_t)8 * SYN_HZ;
+    for (int i = 0; i < n; i++) {
+        uint64_t p = s_mic_pos + i;
+        buf[i] = (p >= warm && p < end) ? syn_sample(p - warm) : 0;
+    }
     s_mic_pos += n;
     return n;
 }

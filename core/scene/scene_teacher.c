@@ -234,6 +234,17 @@ static void run_analysis(void)
                 i, s_words[i].verdict, s_words[i].score,
                 s_words[i].user_start_ms, s_words[i].user_end_ms);
 
+    // If NOTHING aligned (slope-limited DTW found no valid path — take too
+    // warped/short/mangled to judge), don't show a review of gray marks.
+    int unclear = 0;
+    for (int i = 0; i < s_nwords; i++)
+        if (s_words[i].verdict == RECITE_UNCLEAR) unclear++;
+    if (unclear == s_nwords && s_nwords > 0) {
+        s_ready_hint = "Couldn't align - recite the whole ayah";
+        s_state = TEA_READY;
+        return;
+    }
+
     // Jump the review cursor to the first word needing attention.
     s_sel_word = 0;
     for (int i = 0; i < s_nwords; i++)
@@ -339,6 +350,7 @@ static color_t verdict_color(ReciteVerdict v)
     switch (v) {
     case RECITE_GOOD:    return THEME_ACTIVE;
     case RECITE_UNSURE:  return THEME_ACCENT;
+    case RECITE_UNCLEAR: return THEME_DIM;      // gray: no judgement made
     default:             return THEME_BADGE;
     }
 }
@@ -349,6 +361,7 @@ static const char *verdict_text(ReciteVerdict v)
     case RECITE_GOOD:    return "close match";
     case RECITE_UNSURE:  return "a bit different - listen";
     case RECITE_MISMATCH:return "quite different - compare";
+    case RECITE_UNCLEAR: return "couldn't judge - listen + retry";
     default:             return "not heard - try again";
     }
 }

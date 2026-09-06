@@ -18,6 +18,7 @@ typedef enum {
     RECITE_UNSURE,      // somewhat different — worth a listen
     RECITE_MISMATCH,    // significantly different from the reference
     RECITE_MISSING,     // little/no voice where this word should be
+    RECITE_UNCLEAR,     // couldn't align confidently — no judgement made
 } ReciteVerdict;
 
 typedef struct {

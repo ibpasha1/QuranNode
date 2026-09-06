@@ -13,25 +13,31 @@
 #define FRAME_MS   40
 #define MAX_FRAMES 500      // 20s cap per side
 
-// Features: log-energy + ZCR + 12 MFCCs. The cepstral coefficients capture
-// the vowel/consonant CONTENT of each frame, which is what separates wrong
-// words recited with the right rhythm from the real thing — the hand-rolled
-// envelope features that preceded them could not (field-proven: deliberate
-// gibberish with matching cadence scored as genuine). The per-utterance
-// z-norm below doubles as cepstral mean/variance normalization, cancelling
-// mic/channel coloring and voice-brightness differences.
+// Features: log-energy + 12 MFCCs + their delta and delta-delta (rate of
+// change / acceleration). The cepstral coefficients capture the vowel/
+// consonant CONTENT of each frame; the deltas capture the TRANSITIONS into
+// and out of consonants, which carry much of what distinguishes Arabic
+// articulation (a stationary spectral shape looks the same for many wrong
+// sounds; its trajectory doesn't).
 #define N_MFCC     12
-#define N_FEAT     (2 + N_MFCC)
+#define N_FEAT     (1 + 3 * N_MFCC)   // energy, C, dC, ddC
 #define FFT_N      512      // 32ms window @16k, centered in each frame
 #define N_MEL      20
 #define MEL_LO_HZ  100.f
 #define MEL_HI_HZ  7000.f
 #define FEAT_HZ    16000    // analysis domain; other rates are decimated in
 
-// Feature distance thresholds on z-normalized features (empirical; identical
+// Feature distance thresholds on normalized features (empirical; identical
 // audio scores ~0). Deliberately generous — V1 flags, it doesn't grade.
-#define TH_GOOD    1.0f
+#define TH_GOOD    1.25f
 #define TH_UNSURE  1.8f
+
+// Extra cost per non-diagonal DTW step, and per-word warp penalty gain: the
+// aligner pays for stretching/compressing, so it can no longer "explain
+// away" a mistake with an aggressive alignment for free.
+#define STEP_PEN   0.15f
+#define WARP_GAIN  0.35f
+#define DTW_BAND   30       // Sakoe-Chiba half-width, frames (~1.2s)
 
 typedef struct { float f[N_FEAT]; float raw_db; } Frame;
 
@@ -113,9 +119,9 @@ static int extract(const int16_t *pcm, uint32_t n, uint32_t hz, Frame *out)
             if (j && ((s[j] >= 0) != (s[j - 1] >= 0))) zc++;
         }
         e /= flen;
+        (void)zc;
         out[i].raw_db = (float)(10.0 * log10(e + 1e-10));
         out[i].f[0] = out[i].raw_db;
-        out[i].f[1] = (float)zc * (float)FEAT_HZ / (float)flen / (float)hz;
 
         // MFCCs from a 64ms Hann-windowed slice centered in the frame,
         // gathered at 16k spacing from the native-rate samples.
@@ -146,58 +152,94 @@ static int extract(const int16_t *pcm, uint32_t n, uint32_t hz, Frame *out)
             for (int m = 0; m < N_MEL; m++)
                 acc += logmel[m] *
                        cosf((float)M_PI * c * (m + 0.5f) / N_MEL);
-            out[i].f[1 + c] = acc;
+            out[i].f[c] = acc;
         }
     }
     free(fx);
     return nf;
 }
 
-// Z-normalize each feature dim over the utterance: cancels mic gain, overall
-// voice brightness, and level differences between the reference and the user.
-// Stats come from VOICED frames only — silence log-energy is an extreme
-// outlier (~-100dB) that would skew mean/std by how much silence each side
-// happens to contain, making identical voice score as different. Values are
-// clamped to +/-4 sigma so residual silence frames stay bounded outliers.
-static void znorm(Frame *fr, int n, float floor_db)
+// Delta (+/-1 frame slope) and delta-delta of the cepstral coefficients.
+static void add_deltas(Frame *fr, int n)
 {
-    for (int d = 0; d < N_FEAT; d++) {
-        double mu = 0, sd = 0;
-        int nv = 0;
-        for (int i = 0; i < n; i++)
-            if (fr[i].raw_db > floor_db) { mu += fr[i].f[d]; nv++; }
-        if (nv < 4) {   // almost nothing voiced: fall back to all frames
-            mu = 0; nv = n;
-            for (int i = 0; i < n; i++) mu += fr[i].f[d];
+    for (int c = 1; c <= N_MFCC; c++) {
+        for (int t = 0; t < n; t++) {
+            int a = t > 0 ? t - 1 : 0, b = t < n - 1 ? t + 1 : n - 1;
+            fr[t].f[N_MFCC + c] = (fr[b].f[c] - fr[a].f[c]) * 0.5f;
         }
-        mu /= nv;
-        int ns = 0;
-        for (int i = 0; i < n; i++) {
-            if (nv < n && fr[i].raw_db <= floor_db) continue;
-            double v = fr[i].f[d] - mu;
-            sd += v * v; ns++;
-        }
-        sd = sqrt(sd / (ns > 0 ? ns : 1));
-        if (sd < 1e-6) sd = 1e-6;
-        for (int i = 0; i < n; i++) {
-            float z = (float)((fr[i].f[d] - mu) / sd);
-            if (z > 4.f) z = 4.f; else if (z < -4.f) z = -4.f;
-            fr[i].f[d] = z;
+        for (int t = 0; t < n; t++) {
+            int a = t > 0 ? t - 1 : 0, b = t < n - 1 ? t + 1 : n - 1;
+            fr[t].f[2 * N_MFCC + c] =
+                (fr[b].f[N_MFCC + c] - fr[a].f[N_MFCC + c]) * 0.5f;
         }
     }
 }
 
-// Distance normalized by dimension count so scores stay in the same ballpark
-// as before (~0 identical, ~1-2 matched cross-voice, higher for divergence)
-// regardless of the feature-vector width.
+// Cepstral MEAN normalization per side (cancels mic/channel coloring and
+// overall voice brightness), but the per-dim SCALE comes from the REFERENCE
+// only, applied to both sides. Full per-side variance normalization would
+// make a monotone mumble look as spectrally lively as the reciter — the
+// variance difference IS information about articulation, so we keep it.
+// Stats over VOICED frames only; silence frames would skew them by how much
+// silence each side happens to contain. Output clamped to +/-5 ref-sigma.
+static void cmn_stats(const Frame *fr, int n, float floor_db,
+                      float *mu, float *sd /* sd may be NULL */)
+{
+    for (int d = 0; d < N_FEAT; d++) {
+        double m = 0, s = 0;
+        int nv = 0;
+        for (int i = 0; i < n; i++)
+            if (fr[i].raw_db > floor_db) { m += fr[i].f[d]; nv++; }
+        if (nv < 4) {
+            m = 0; nv = n;
+            for (int i = 0; i < n; i++) m += fr[i].f[d];
+        }
+        m /= nv;
+        mu[d] = (float)m;
+        if (!sd) continue;
+        int ns = 0;
+        for (int i = 0; i < n; i++) {
+            if (fr[i].raw_db <= floor_db && nv < n) continue;
+            double v = fr[i].f[d] - m;
+            s += v * v; ns++;
+        }
+        s = sqrt(s / (ns > 0 ? ns : 1));
+        sd[d] = s < 1e-4 ? 1e-4f : (float)s;
+    }
+}
+
+static void cmn_apply(Frame *fr, int n, const float *mu, const float *sd)
+{
+    for (int d = 0; d < N_FEAT; d++)
+        for (int i = 0; i < n; i++) {
+            float z = (fr[i].f[d] - mu[d]) / sd[d];
+            if (z > 5.f) z = 5.f; else if (z < -5.f) z = -5.f;
+            fr[i].f[d] = z;
+        }
+}
+
+// Weighted distance: static MFCCs and energy carry the match; deltas refine
+// (transition shape), delta-deltas gently. Normalized so scores stay in the
+// same ballpark (~0 identical, ~1-2 matched, higher diverging) regardless of
+// the vector width.
+static float feat_w(int d)
+{
+    if (d == 0) return 1.0f;                  // energy
+    if (d <= N_MFCC) return 1.0f;             // C1..C12
+    if (d <= 2 * N_MFCC) return 0.7f;         // deltas
+    return 0.4f;                              // delta-deltas
+}
+
+static float s_wsum;   // set once in recite_analyze
+
 static float fdist(const Frame *a, const Frame *b)
 {
     float s = 0;
     for (int d = 0; d < N_FEAT; d++) {
         float v = a->f[d] - b->f[d];
-        s += v * v;
+        s += feat_w(d) * v * v;
     }
-    return sqrtf(s * (3.f / N_FEAT));
+    return sqrtf(s * (3.f / s_wsum));
 }
 
 // Percentile of the raw frame energies (dB). p in [0,100].
@@ -239,61 +281,95 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
     float ref_floor = percentile_db(rf, rn, 5) + 8.f;
     float ref_cap = percentile_db(rf, rn, 95) - 12.f;
     if (ref_floor > ref_cap) ref_floor = ref_cap;
-    znorm(rf, rn, ref_floor);
-    znorm(uf, un, usr_floor);
 
-    // DTW: cost[i][j] = best path cost aligning ref[0..i] with usr[0..j].
-    // Full matrix of costs + backpointers (coarse frames keep it ~700KB max,
-    // typically ~50KB for real ayat; malloc'd, so failure degrades gracefully).
+    add_deltas(rf, rn);
+    add_deltas(uf, un);
+    {
+        static float mu[N_FEAT], sd[N_FEAT];
+        cmn_stats(rf, rn, ref_floor, mu, sd);
+        cmn_apply(rf, rn, mu, sd);
+        cmn_stats(uf, un, usr_floor, mu, NULL);   // own mean, REF scale
+        cmn_apply(uf, un, mu, sd);
+    }
+    s_wsum = 0;
+    for (int d = 0; d < N_FEAT; d++) s_wsum += feat_w(d);
+
+    // Constrained DTW: Sakoe-Chiba band around the length-scaled diagonal +
+    // slope-limited steps {(1,1),(1,2),(2,1)} so the local warp stays within
+    // 0.5-2x, with a small penalty on the warping steps. The aligner can now
+    // FAIL (no valid path) instead of explaining a mistake away by cramming
+    // reference frames onto slivers of audio — failure itself is a verdict
+    // ("couldn't align").
+    const float INF = 1e30f;
     float *cost = malloc(sizeof(float) * rn * un);
     uint8_t *bp = malloc((size_t)rn * un);
     if (!cost || !bp) { free(cost); free(bp); free(rf); return false; }
 #define C(i, j) cost[(i) * un + (j)]
+    for (int i = 0; i < rn * un; i++) cost[i] = INF;
     for (int i = 0; i < rn; i++) {
-        for (int j = 0; j < un; j++) {
+        int jc = (int)((int64_t)i * un / rn);
+        int jlo = jc - DTW_BAND < 0 ? 0 : jc - DTW_BAND;
+        int jhi = jc + DTW_BAND >= un ? un - 1 : jc + DTW_BAND;
+        for (int j = jlo; j <= jhi; j++) {
             float d = fdist(&rf[i], &uf[j]);
-            float best; uint8_t dir;
-            if (i == 0 && j == 0) { best = 0; dir = 0; }
-            else if (i == 0)      { best = C(0, j - 1); dir = 1; }       // left
-            else if (j == 0)      { best = C(i - 1, 0); dir = 2; }       // up
-            else {
-                float diag = C(i - 1, j - 1), left = C(i, j - 1), up = C(i - 1, j);
-                if (diag <= left && diag <= up) { best = diag; dir = 3; }
-                else if (left <= up)            { best = left; dir = 1; }
-                else                            { best = up;   dir = 2; }
-            }
-            C(i, j) = best + d;
-            bp[i * un + j] = dir;
+            if (i == 0 && j == 0) { C(0, 0) = d; bp[0] = 0; continue; }
+            float best = INF;
+            uint8_t dir = 0;
+            if (i >= 1 && j >= 1 && C(i - 1, j - 1) < best)
+                { best = C(i - 1, j - 1); dir = 1; }
+            if (i >= 1 && j >= 2 && C(i - 1, j - 2) + STEP_PEN < best)
+                { best = C(i - 1, j - 2) + STEP_PEN; dir = 2; }
+            if (i >= 2 && j >= 1 && C(i - 2, j - 1) + STEP_PEN < best)
+                { best = C(i - 2, j - 1) + STEP_PEN; dir = 3; }
+            if (dir) { C(i, j) = best + d; bp[i * un + j] = dir; }
         }
     }
+    bool aligned = C(rn - 1, un - 1) < INF / 2;
 
     // Backtrack: for each ref frame, the user frame range it aligned to.
     int lo[MAX_FRAMES], hi[MAX_FRAMES];
     for (int i = 0; i < rn; i++) { lo[i] = un; hi[i] = -1; }
-    {
+    if (aligned) {
         int i = rn - 1, j = un - 1;
         while (1) {
             if (j < lo[i]) lo[i] = j;
             if (j > hi[i]) hi[i] = j;
             uint8_t dir = bp[i * un + j];
             if (dir == 0) break;
-            if (dir == 3) { i--; j--; }
-            else if (dir == 1) j--;
-            else i--;
+            if (dir == 1) { i--; j--; }
+            else if (dir == 2) { i--; j -= 2; }
+            else {   // (2,1): ref frame i-1 was skipped; pin it to j
+                if (j < lo[i - 1]) lo[i - 1] = j;
+                if (j > hi[i - 1]) hi[i - 1] = j;
+                i -= 2; j--;
+            }
         }
     }
 
+    // Alignment failed outright (take too warped for the slope limits):
+    // that's information, not an error — every word is "couldn't judge".
+    if (!aligned) {
+        for (int w = 0; w < n_words; w++)
+            out[w] = (ReciteWord){ RECITE_UNCLEAR, 98.f, 0, 0 };
+        free(cost); free(bp); free(rf);
+        return true;
+    }
+
     // Score each reference word span. Pause frames in the user audio (a
-    // learner breathing between words) are excluded from the mean — pausing
-    // isn't a mismatch. Whether the word was voiced AT ALL is judged
-    // separately for the "missing" verdict.
+    // learner breathing between words) are excluded — pausing isn't a
+    // mismatch. The score blends the MEAN distance with the 90th percentile:
+    // a 150ms contiguous mismatch inside an otherwise-fine word barely moves
+    // the mean but shows up hard in the upper tail. A warp penalty is added
+    // when the word needed a much more aggressive stretch/compression than
+    // the take overall — pathological alignments reduce confidence.
     for (int w = 0; w < n_words; w++) {
         int fa = (int)(words[w].start_ms / FRAME_MS);
         int fb = (int)(words[w].end_ms / FRAME_MS);
         if (fb >= rn) fb = rn - 1;
         if (fa > fb) fa = fb;
 
-        double sum = 0; int cnt = 0, voiced = 0, span = 0;
+        float dl[MAX_FRAMES];
+        int cnt = 0, voiced = 0, span = 0;
         int ja = un, jb = -1;
         for (int i = fa; i <= fb; i++) {
             if (hi[i] < 0) continue;
@@ -301,8 +377,7 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
             if (hi[i] > jb) jb = hi[i];
             for (int j = lo[i]; j <= hi[i]; j++) {
                 if (uf[j].raw_db <= usr_floor) continue;   // pause, not speech
-                sum += fdist(&rf[i], &uf[j]);
-                cnt++;
+                if (cnt < MAX_FRAMES) dl[cnt++] = fdist(&rf[i], &uf[j]);
             }
         }
         if (jb >= ja)
@@ -310,17 +385,41 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
                 if (uf[j].raw_db > usr_floor) voiced++;
 
         ReciteWord *o = &out[w];
-        o->score = cnt ? (float)(sum / cnt) : 99.f;
         o->user_start_ms = (jb >= ja) ? (uint32_t)ja * FRAME_MS : 0;
         o->user_end_ms   = (jb >= ja) ? (uint32_t)(jb + 1) * FRAME_MS : 0;
-        // Missing = the mapped stretch is mostly SILENCE. Deliberately not a
-        // duration test: connected recitation ("alhamdu-lillahi") blends
-        // words, and a fast take squeezes some words to slivers of voiced
-        // audio — that's merged delivery, not a skipped word. Flagging it
-        // "not heard" was a field bug; V1 prefers missing a real skip over
-        // flagging correct recitation.
-        o->verdict = (cnt == 0 || span == 0 || voiced * 3 < span)
-                         ? RECITE_MISSING : RECITE_GOOD;   // grade below
+        if (jb < ja) {   // word never visited by the path: can't judge it
+            o->verdict = RECITE_UNCLEAR;
+            o->score = 98.f;
+            continue;
+        }
+        if (cnt == 0 || span == 0 || voiced * 3 < span) {
+            // Mapped stretch is mostly SILENCE. Deliberately not a duration
+            // test: connected recitation blends words; merged delivery is
+            // not a skipped word.
+            o->verdict = RECITE_MISSING;
+            o->score = 99.f;
+            continue;
+        }
+        // sort dl for mean + p90
+        for (int i = 1; i < cnt; i++) {
+            float v = dl[i]; int j = i - 1;
+            while (j >= 0 && dl[j] > v) { dl[j + 1] = dl[j]; j--; }
+            dl[j + 1] = v;
+        }
+        double mean = 0;
+        for (int i = 0; i < cnt; i++) mean += dl[i];
+        mean /= cnt;
+        float p90 = dl[cnt * 9 / 10 >= cnt ? cnt - 1 : cnt * 9 / 10];
+        float ac = 0.65f * (float)mean + 0.35f * p90;
+
+        float ratio_l = (float)(jb - ja + 1) / (float)(fb - fa + 1);
+        float ratio_g = (float)un / (float)rn;
+        float wr = fabsf(log2f(ratio_l / ratio_g));
+        float wp = WARP_GAIN * wr;
+        if (wp > 0.9f) wp = 0.9f;
+
+        o->score = ac + wp;
+        o->verdict = RECITE_GOOD;   // graded below
     }
 
     // Verdicts are RELATIVE to this take: a learner's voice against a master
@@ -334,7 +433,7 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
         float sc[128];
         int ns = 0;
         for (int w = 0; w < n_words && ns < 128; w++)
-            if (out[w].verdict != RECITE_MISSING) sc[ns++] = out[w].score;
+            if (out[w].verdict == RECITE_GOOD) sc[ns++] = out[w].score;
         float base = 0;
         if (ns) {
             for (int i = 1; i < ns; i++) {   // insertion sort
@@ -344,17 +443,16 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
             }
             base = sc[ns / 4];
         }
-        // Ceilings calibrated on real device takes (Sep 2026 field logs):
-        // genuine words score <=1.9 against the reference; deliberate
-        // gibberish mostly >=2.0. Keeping the ceiling near that line flags
-        // most wrong-content words while genuine recitation stays green —
-        // full wrong-word detection still needs the V2 phoneme model.
-        float th_g = base * 1.30f; if (th_g < TH_GOOD) th_g = TH_GOOD;
-        float th_u = base * 1.70f; if (th_u < TH_UNSURE) th_u = TH_UNSURE;
+        // Multipliers/ceilings anchored on acoustic-loopback runs with the
+        // delta-MFCC engine (correct ayah = 1.2-1.9; same-voice WRONG ayah =
+        // 1.8-2.7 + missing/unaligned). To be re-tuned on the labeled
+        // device-take dataset — see the field-tuning notes in the repo log.
+        float th_g = base * 1.50f; if (th_g < TH_GOOD) th_g = TH_GOOD;
+        float th_u = base * 1.90f; if (th_u < TH_UNSURE) th_u = TH_UNSURE;
         if (th_g > 1.95f) th_g = 1.95f;
         if (th_u > 2.55f) th_u = 2.55f;
         for (int w = 0; w < n_words; w++) {
-            if (out[w].verdict == RECITE_MISSING) continue;
+            if (out[w].verdict != RECITE_GOOD) continue;   // missing/unclear
             out[w].verdict = out[w].score <= th_g ? RECITE_GOOD
                            : out[w].score <= th_u ? RECITE_UNSURE
                                                   : RECITE_MISMATCH;
