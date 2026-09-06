@@ -4,10 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-// 100ms frames: coarse enough that a full DTW matrix for a ~20s ayah is small
-// (~200x300 floats), fine enough to resolve word spans (words run 300ms+).
-#define FRAME_MS   100
-#define MAX_FRAMES 600      // 60s cap per side
+// 40ms frames (32ms analysis window): fine enough that a word spans 15-25
+// frames, so DTW must match the phonetic TRAJECTORY through each word — at
+// the previous 100ms a word was 3-8 frames of averaged spectrum, and
+// compressed same-voice mumble could cherry-pick a charitable alignment
+// (field-proven). A ~20s ayah caps the DTW matrix at 500x500 (~1.25MB,
+// malloc'd; bundled ayat are well under).
+#define FRAME_MS   40
+#define MAX_FRAMES 500      // 20s cap per side
 
 // Features: log-energy + ZCR + 12 MFCCs. The cepstral coefficients capture
 // the vowel/consonant CONTENT of each frame, which is what separates wrong
@@ -18,7 +22,7 @@
 // mic/channel coloring and voice-brightness differences.
 #define N_MFCC     12
 #define N_FEAT     (2 + N_MFCC)
-#define FFT_N      1024     // 64ms window @16k, centered in each frame
+#define FFT_N      512      // 32ms window @16k, centered in each frame
 #define N_MEL      20
 #define MEL_LO_HZ  100.f
 #define MEL_HI_HZ  7000.f

@@ -28,7 +28,9 @@
 #define MIC_HZ        16000
 #define REC_MAX_SEC   40                      // recording cap
 #define REC_MAX_N     (MIC_HZ * REC_MAX_SEC)
-#define REF_MAX_N     (48000 * 45)            // reference PCM cap (~45s @48k)
+#define REF_MAX_N     (44100 * 22)            // reference PCM cap (~22s @44.1k
+                                              //  = recite.c's 20s frame cap;
+                                              //  frees heap for the DTW matrix)
 #define MAX_WORDS     64
 
 typedef enum {
