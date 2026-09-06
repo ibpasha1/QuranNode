@@ -240,6 +240,7 @@ static bool s_mic_ok;
 // vibration) — it skews the endpointer, the local features, and the ASR.
 // alpha = fs/(fs + 2*pi*fc) at 16k/90Hz ~= 0.9659 -> Q15 31652.
 static int32_t s_hp_x, s_hp_y;
+static uint32_t s_mic_clip;   // saturated samples this session (logged on stop)
 
 bool hal_mic_start(uint32_t hz)
 {
@@ -275,10 +276,15 @@ int hal_mic_read(int16_t *buf, int max_samples)
         return 0;   // nothing ready yet
     int n = (int)(got / sizeof(int32_t));
     for (int i = 0; i < n; i++) {
-        int32_t x = raw[i] >> 13;   // 24-bit MSB-aligned -> int16 range + gain
+        // >>14 = +12dB over the natural 24->16 conversion. The previous >>13
+        // (+18dB) pushed close-mic speech past full scale, and the old cast
+        // WRAPPED instead of clipping — audible distortion on every loud
+        // syllable (user-confirmed by ear on the training WAVs).
+        int32_t x = raw[i] >> 14;
         int32_t y = (int32_t)(((int64_t)31652 * (s_hp_y + x - s_hp_x)) >> 15);
         s_hp_x = x;
         s_hp_y = y;
+        if (y > 32767 || y < -32768) s_mic_clip++;
         buf[i] = sat16(y);
     }
     return n;
@@ -287,6 +293,10 @@ int hal_mic_read(int16_t *buf, int max_samples)
 void hal_mic_stop(void)
 {
     if (!s_mic_ok) return;
+    if (s_mic_clip)
+        ESP_LOGW(TAG, "mic: %u samples clipped this take (reduce gain?)",
+                 (unsigned)s_mic_clip);
+    s_mic_clip = 0;
     i2s_channel_disable(s_rx);
     i2s_del_channel(s_rx);
     s_rx = NULL; s_mic_ok = false;
