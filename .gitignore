@@ -37,3 +37,4 @@ tools/quran-tajweed/
 
 # Training takes: user voice recordings — never publish
 training_takes/
+server/.venv/
