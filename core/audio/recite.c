@@ -7,13 +7,22 @@
 // 100ms frames: coarse enough that a full DTW matrix for a ~20s ayah is small
 // (~200x300 floats), fine enough to resolve word spans (words run 300ms+).
 #define FRAME_MS   100
-#define N_FEAT     6        // log-RMS, ZCR, tilt + 3 spectral band ratios
 #define MAX_FRAMES 600      // 60s cap per side
 
-// Band centers for the spectral features (Goertzel single-bin energies,
-// expressed relative to total frame energy so they capture timbre, not
-// level). Chosen for voice: F0/low harmonics, mid formants, upper formants.
-static const float BAND_HZ[3] = { 300.f, 900.f, 2200.f };
+// Features: log-energy + ZCR + 12 MFCCs. The cepstral coefficients capture
+// the vowel/consonant CONTENT of each frame, which is what separates wrong
+// words recited with the right rhythm from the real thing — the hand-rolled
+// envelope features that preceded them could not (field-proven: deliberate
+// gibberish with matching cadence scored as genuine). The per-utterance
+// z-norm below doubles as cepstral mean/variance normalization, cancelling
+// mic/channel coloring and voice-brightness differences.
+#define N_MFCC     12
+#define N_FEAT     (2 + N_MFCC)
+#define FFT_N      1024     // 64ms window @16k, centered in each frame
+#define N_MEL      20
+#define MEL_LO_HZ  100.f
+#define MEL_HI_HZ  7000.f
+#define FEAT_HZ    16000    // analysis domain; other rates are decimated in
 
 // Feature distance thresholds on z-normalized features (empirical; identical
 // audio scores ~0). Deliberately generous — V1 flags, it doesn't grade.
@@ -22,46 +31,121 @@ static const float BAND_HZ[3] = { 300.f, 900.f, 2200.f };
 
 typedef struct { float f[N_FEAT]; float raw_db; } Frame;
 
-// Extract per-frame features from mono s16. Returns frame count.
+// In-place iterative radix-2 complex FFT (re/im interleaved pairs).
+static void fft_c(float *x, int n)
+{
+    for (int i = 1, j = 0; i < n; i++) {   // bit-reverse permutation
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            float tr = x[2 * i], ti = x[2 * i + 1];
+            x[2 * i] = x[2 * j]; x[2 * i + 1] = x[2 * j + 1];
+            x[2 * j] = tr; x[2 * j + 1] = ti;
+        }
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        float ang = -2.0f * (float)M_PI / (float)len;
+        float wr = cosf(ang), wi = sinf(ang);
+        for (int i = 0; i < n; i += len) {
+            float cr = 1.f, ci = 0.f;
+            for (int k = 0; k < len / 2; k++) {
+                int a = 2 * (i + k), b = 2 * (i + k + len / 2);
+                float vr = x[b] * cr - x[b + 1] * ci;
+                float vi = x[b] * ci + x[b + 1] * cr;
+                x[b] = x[a] - vr; x[b + 1] = x[a + 1] - vi;
+                x[a] += vr; x[a + 1] += vi;
+                float ncr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr; cr = ncr;
+            }
+        }
+    }
+}
+
+static float mel_of(float hz) { return 2595.f * log10f(1.f + hz / 700.f); }
+
+// Mel filterbank: for each FFT bin, which triangular filter it falls in and
+// the weight (each bin contributes w to filter k and 1-w to filter k-1).
+static uint8_t s_mel_bin[FFT_N / 2];
+static float   s_mel_w[FFT_N / 2];
+static bool    s_mel_ready;
+
+static void mel_init(void)
+{
+    float mlo = mel_of(MEL_LO_HZ), mhi = mel_of(MEL_HI_HZ);
+    for (int b = 0; b < FFT_N / 2; b++) {
+        float hz = (float)b * FEAT_HZ / FFT_N;
+        float m = (mel_of(hz) - mlo) / (mhi - mlo) * N_MEL;   // 0..N_MEL
+        if (m <= 0.f || m >= (float)N_MEL) { s_mel_bin[b] = 0xFF; continue; }
+        s_mel_bin[b] = (uint8_t)m;
+        s_mel_w[b] = m - (float)s_mel_bin[b];
+    }
+    s_mel_ready = true;
+}
+
+// Extract per-frame features from mono s16 at any rate (decimated to 16k by
+// nearest-neighbor gather — fine for 100ms-frame features). Returns count.
 static int extract(const int16_t *pcm, uint32_t n, uint32_t hz, Frame *out)
 {
-    uint32_t flen = hz * FRAME_MS / 1000;
+    if (hz == 0) return 0;
+    if (!s_mel_ready) mel_init();
+    uint32_t flen = hz * FRAME_MS / 1000;   // native samples per frame
     if (flen == 0) return 0;
     int nf = (int)(n / flen);
     if (nf > MAX_FRAMES) nf = MAX_FRAMES;
+
+    float *fx = malloc(sizeof(float) * FFT_N * 2);
+    if (!fx) return 0;
+
     for (int i = 0; i < nf; i++) {
         const int16_t *s = pcm + (uint32_t)i * flen;
-        double e = 0, ed = 0;
+
+        // Energy + ZCR over the full frame in the native domain.
+        double e = 0;
         int zc = 0;
         for (uint32_t j = 0; j < flen; j++) {
             double v = s[j] / 32768.0;
             e += v * v;
-            if (j) {
-                double d = (s[j] - s[j - 1]) / 32768.0;
-                ed += d * d;
-                if ((s[j] >= 0) != (s[j - 1] >= 0)) zc++;
-            }
+            if (j && ((s[j] >= 0) != (s[j - 1] >= 0))) zc++;
         }
-        e /= flen; ed /= flen;
+        e /= flen;
         out[i].raw_db = (float)(10.0 * log10(e + 1e-10));
         out[i].f[0] = out[i].raw_db;
-        out[i].f[1] = (float)zc / (float)flen;             // pitch-ish proxy
-        out[i].f[2] = (float)(10.0 * log10(ed / (e + 1e-10) + 1e-10)); // tilt
+        out[i].f[1] = (float)zc * (float)FEAT_HZ / (float)flen / (float)hz;
 
-        // Spectral bands (Goertzel single-bin energy at each center),
-        // relative to total energy -> timbre profile independent of level.
-        for (int b = 0; b < 3; b++) {
-            double w = 2.0 * M_PI * BAND_HZ[b] / (double)hz;
-            double coef = 2.0 * cos(w);
-            double q0, q1 = 0, q2 = 0;
-            for (uint32_t j = 0; j < flen; j++) {
-                q0 = coef * q1 - q2 + s[j] / 32768.0;
-                q2 = q1; q1 = q0;
-            }
-            double p = (q1 * q1 + q2 * q2 - coef * q1 * q2) / flen;
-            out[i].f[3 + b] = (float)(10.0 * log10(p / (e * flen + 1e-10) + 1e-10));
+        // MFCCs from a 64ms Hann-windowed slice centered in the frame,
+        // gathered at 16k spacing from the native-rate samples.
+        uint32_t span16 = (uint32_t)((uint64_t)flen * FEAT_HZ / hz); // ~1600
+        uint32_t off16 = span16 > FFT_N ? (span16 - FFT_N) / 2 : 0;
+        for (int k = 0; k < FFT_N; k++) {
+            uint32_t j = (uint32_t)((uint64_t)(off16 + k) * hz / FEAT_HZ);
+            if (j >= flen) j = flen - 1;
+            float w = 0.5f - 0.5f * cosf(2.f * (float)M_PI * k / (FFT_N - 1));
+            fx[2 * k] = (s[j] / 32768.f) * w;
+            fx[2 * k + 1] = 0.f;
+        }
+        fft_c(fx, FFT_N);
+
+        float mel[N_MEL] = { 0 };
+        for (int b = 1; b < FFT_N / 2; b++) {
+            if (s_mel_bin[b] == 0xFF) continue;
+            float p = fx[2 * b] * fx[2 * b] + fx[2 * b + 1] * fx[2 * b + 1];
+            int m = s_mel_bin[b];
+            float w = s_mel_w[b];
+            mel[m] += p * (1.f - w);
+            if (m + 1 < N_MEL) mel[m + 1] += p * w;
+        }
+        float logmel[N_MEL];
+        for (int m = 0; m < N_MEL; m++) logmel[m] = log10f(mel[m] + 1e-9f);
+        for (int c = 1; c <= N_MFCC; c++) {   // DCT-II, c0 (level) dropped
+            float acc = 0;
+            for (int m = 0; m < N_MEL; m++)
+                acc += logmel[m] *
+                       cosf((float)M_PI * c * (m + 0.5f) / N_MEL);
+            out[i].f[1 + c] = acc;
         }
     }
+    free(fx);
     return nf;
 }
 
@@ -99,19 +183,17 @@ static void znorm(Frame *fr, int n, float floor_db)
     }
 }
 
-// Weighted distance: envelope/rate features carry the match; the spectral
-// bands refine it (they separate voice from noise/garble) but are damped so
-// legitimate voice-timbre differences don't overwhelm the rhythm agreement.
-static const float FEAT_W[N_FEAT] = { 1.f, 1.f, 1.f, 0.45f, 0.45f, 0.45f };
-
+// Distance normalized by dimension count so scores stay in the same ballpark
+// as before (~0 identical, ~1-2 matched cross-voice, higher for divergence)
+// regardless of the feature-vector width.
 static float fdist(const Frame *a, const Frame *b)
 {
     float s = 0;
     for (int d = 0; d < N_FEAT; d++) {
         float v = a->f[d] - b->f[d];
-        s += FEAT_W[d] * v * v;
+        s += v * v;
     }
-    return sqrtf(s);
+    return sqrtf(s * (3.f / N_FEAT));
 }
 
 // Percentile of the raw frame energies (dB). p in [0,100].
