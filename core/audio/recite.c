@@ -258,10 +258,15 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
             }
             base = sc[ns / 4];
         }
+        // Ceilings calibrated on real device takes (Sep 2026 field logs):
+        // genuine words score <=1.9 against the reference; deliberate
+        // gibberish mostly >=2.0. Keeping the ceiling near that line flags
+        // most wrong-content words while genuine recitation stays green —
+        // full wrong-word detection still needs the V2 phoneme model.
         float th_g = base * 1.30f; if (th_g < TH_GOOD) th_g = TH_GOOD;
         float th_u = base * 1.70f; if (th_u < TH_UNSURE) th_u = TH_UNSURE;
-        if (th_g > 2.6f) th_g = 2.6f;
-        if (th_u > 3.2f) th_u = 3.2f;
+        if (th_g > 1.95f) th_g = 1.95f;
+        if (th_u > 2.55f) th_u = 2.55f;
         for (int w = 0; w < n_words; w++) {
             if (out[w].verdict == RECITE_MISSING) continue;
             out[w].verdict = out[w].score <= th_g ? RECITE_GOOD

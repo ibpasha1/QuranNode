@@ -141,6 +141,13 @@ static void start_listen(void)
     s_state = TEA_LISTEN;
 }
 
+// The INMP441 emits a DC-settle transient right after the I2S channel starts
+// — loud enough to trip VOICE_PEAK at t=0 (every device take logged
+// voiced=[0..]). Discard the first stretch of samples so the endpointer and
+// word 1's alignment see real audio, not the thump.
+#define MIC_WARMUP_MS 250
+static uint32_t s_warmup_left;   // samples still to discard
+
 static void start_recite(void)
 {
     hal_audio_pause(s_clip);
@@ -150,6 +157,7 @@ static void start_recite(void)
     s_heard = false;
     s_voice_a = s_voice_b = 0;
     s_sil_ms = s_wait_ms = 0;
+    s_warmup_left = MIC_HZ * MIC_WARMUP_MS / 1000;
     s_ready_hint = NULL;
     hal_audio_click(true);   // audible "your turn" cue
     s_state = TEA_RECITE;
@@ -244,6 +252,15 @@ static void on_tick(uint32_t dt_ms)
         break;
     case TEA_RECITE: {
         int got = hal_mic_read(s_rec + s_rec_n, (int)(REC_MAX_N - s_rec_n));
+        if (got > 0 && s_warmup_left > 0) {   // drop the mic-start transient
+            uint32_t drop = (uint32_t)got < s_warmup_left ? (uint32_t)got
+                                                          : s_warmup_left;
+            s_warmup_left -= drop;
+            if ((uint32_t)got > drop)
+                memmove(s_rec + s_rec_n, s_rec + s_rec_n + drop,
+                        ((uint32_t)got - drop) * sizeof(int16_t));
+            got -= (int)drop;
+        }
         if (got > 0) {
             // Peak of this chunk: drives the meter and the voice endpointer.
             int peak = 0;
