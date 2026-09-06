@@ -45,18 +45,25 @@ DEVICE (unchanged UX)                    SCORING SERVER (LAN Mac first)
 
 ## Model
 
-Primary: **`tarteel-ai/whisper-base-ar-quran`** (Hugging Face) — Whisper
-fine-tuned on the Tarteel Everyayah dataset, 5.75% WER on Quranic
-recitation. Tarteel's production app does live recitation correction with
-this approach, so the architecture is field-proven.
+Primary (benchmarked on labeled device takes, 2026-09-06):
+**`openai/whisper-large-v3-turbo`** — reads the user's natural fast
+recitation at 75–100% words correct. The originally-planned
+`tarteel-ai/whisper-base-ar-quran` (5.75% WER on murattal) managed only
+~15% on the same takes: it is tuned for slow tajwid delivery and collapses
+on casual-pace speech. Key finding: match the model to the *user's*
+delivery style, not to the reference's.
 
-- Run via `faster-whisper` (CTranslate2, int8) for CPU speed: a 3–5s take
-  transcribes in well under 2s on an M-series Mac.
-- Word-level timestamps requested from the decoder; they map verdicts back
-  to audio spans for per-word replay (fallback: V1's DTW spans).
-- Alternatives if timestamps/accuracy disappoint: `whisper-small-ar-quran`
-  (accuracy), wav2vec2-CTC Arabic phoneme models (harder timestamps, finer
-  phoneme detail), `whisper-tiny-ar-quran` (speed).
+- ~4s/take on an M-series CPU (transformers fp32); faster-whisper int8
+  and/or GPU cut this several-fold when needed.
+- Capture cleanup in the scorer: 90Hz high-pass (INMP441 field takes carry
+  0–100Hz rumble as loud as the voice) + peak normalization.
+- Model quirks: tarteel fine-tunes ship pre-4.32 generation configs (pass
+  no language/task args; strip `<|...|>` tokens after decode).
+- Pi-cluster note: turbo (~800M params) is NOT Pi-viable; the product
+  cluster runs base/tiny-ar-quran (murattal-paced users), a distilled
+  turbo, or one GPU node. Hosting choice remains just a URL to devices.
+- Word-level timestamps: still TODO (M3); V1's DTW spans are the fallback
+  for per-word replay.
 
 ## Server
 

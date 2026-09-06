@@ -15,7 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import os
-MODEL_ID = os.environ.get("QN_ASR_MODEL", "tarteel-ai/whisper-base-ar-quran")
+# Benchmarked 2026-09-06 on labeled device takes: large-v3-turbo reads the
+# user's natural fast recitation at 75-100% words correct where the
+# murattal-tuned tarteel-ai/whisper-base-ar-quran managed ~15% (it expects
+# slow tajwid delivery). ~4s/take on an M-series CPU. Base remains the
+# low-power fallback via QN_ASR_MODEL.
+MODEL_ID = os.environ.get("QN_ASR_MODEL", "openai/whisper-large-v3-turbo")
 HERE = Path(__file__).parent
 
 # --- Arabic normalization ---------------------------------------------------
@@ -59,7 +64,8 @@ def _load():
         import torch  # noqa: F401  (import check before transformers)
         from transformers import WhisperForConditionalGeneration, WhisperProcessor
         _processor = WhisperProcessor.from_pretrained(MODEL_ID)
-        _model = WhisperForConditionalGeneration.from_pretrained(MODEL_ID)
+        _model = WhisperForConditionalGeneration.from_pretrained(
+            MODEL_ID, torch_dtype=torch.float32)   # some ship fp16; CPU wants f32
         _model.eval()
     return _model, _processor
 
@@ -98,7 +104,8 @@ def transcribe(path: str) -> str:
     with torch.no_grad():
         # No language/task args: the fine-tune is Arabic-Quran-only and ships
         # a pre-transformers-4.32 generation config that rejects them.
-        ids = model.generate(feats)
+        # Beam search: measurably better than greedy on marginal device audio.
+        ids = model.generate(feats, num_beams=5)
     text = processor.batch_decode(ids, skip_special_tokens=True)[0]
     # The tarteel tokenizer predates special-token registration for the task
     # markers, so <|ar|> etc. survive decoding — strip them explicitly.
