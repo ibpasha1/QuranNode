@@ -272,12 +272,29 @@ static void train_save_take(void)
     }
     if (!ok) s_ready_hint = "SD failed - kept in RAM (< = wifi)";
     if (++s_train >= TRAIN_TOTAL) {
-        s_train = -1;
-        s_ready_hint = "20 takes saved: state/train_*.wav";
-        s_state = TEA_READY;
+        // Stay in the trainer — the RAM takes are served from HERE, and
+        // leaving the scene frees them. "<" shares over Wi-Fi.
+        s_train = TRAIN_TOTAL - 1;
+        s_ready_hint = "All 20 done!  < = wifi download";
+        s_state = TEA_TRAIN;
         return;
     }
     s_state = TEA_TRAIN;
+}
+
+// Register the RAM takes on the web server and bring Wi-Fi + HTTP up.
+static void share_takes(void)
+{
+    int n = 0;
+    for (int i = 0; i < TRAIN_TOTAL; i++)
+        if (s_kept[i].wav) {
+            hal_serve_blob(i, s_kept[i].name, s_kept[i].wav, s_kept[i].len);
+            n++;
+        }
+    if (!n) { s_ready_hint = "No takes in RAM - record first"; return; }
+    hal_audio_click(true);
+    hal_ota_start();   // blocks a few seconds while Wi-Fi joins
+    s_share = true;
 }
 
 static void finish_recite(void)
@@ -542,6 +559,13 @@ static void on_render(Canvas *c)
         font_draw_string_centered(c, iy, &font_medium,
                                   listening ? "LISTEN" : "READY",
                                   listening ? THEME_ACTIVE : THEME_TITLE);
+        if (!listening && s_share) {
+            char u[48];
+            const char *url = hal_ota_url();
+            snprintf(u, sizeof(u), "%stakes  <- download here",
+                     url ? url : "wifi connecting... ");
+            font_draw_string_centered(c, iy + 26, &font_tiny, u, THEME_ACTIVE);
+        } else
         font_draw_string_centered(c, iy + 26, &font_tiny,
                                   listening ? "recite it back when the teacher finishes"
                                   : s_ready_hint ? s_ready_hint
@@ -738,6 +762,9 @@ static void on_input(InputEvent e)
             s_ready_hint = NULL;
             s_state = TEA_TRAIN;
             break;
+        case INPUT_NAV_LEFT:   // takes still in RAM? share them from here too
+            share_takes();
+            break;
         case INPUT_BTN_BACK: scene_switch(SCENE_HOME); break;
         default: break;
         }
@@ -756,13 +783,7 @@ static void on_input(InputEvent e)
             s_ready_hint = NULL;
             break;
         case INPUT_NAV_LEFT:   // share the RAM takes over Wi-Fi
-            hal_audio_click(true);
-            for (int i = 0; i < TRAIN_TOTAL; i++)
-                if (s_kept[i].wav)
-                    hal_serve_blob(i, s_kept[i].name, s_kept[i].wav,
-                                   s_kept[i].len);
-            hal_ota_start();   // blocks a few seconds while Wi-Fi joins
-            s_share = true;
+            share_takes();
             break;
         case INPUT_BTN_BACK:
             s_train = -1;
