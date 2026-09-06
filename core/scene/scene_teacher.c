@@ -411,28 +411,30 @@ static void on_render(Canvas *c)
 
     case TEA_REVIEW: {
         draw_ayah_marked(c, band_top, band_bot, true);
-        // Verdict panel for the selected word.
+        // Panel: the OVERALL result headlines (the cursor sits on the worst
+        // word, and its verdict alone read like a judgement of the whole
+        // take — "not heard, try again" after a 3-of-4-green recitation).
         int py = CANVAS_HEIGHT - THEME_KEYBAR_H - 60;
         canvas_rect_fill(c, 0, py, CANVAS_WIDTH, 60, THEME_PANEL);
         canvas_hline(c, 0, py, CANVAS_WIDTH, THEME_GRID);
-        const ReciteWord *w = &s_words[s_sel_word];
-        char line[48];
-        snprintf(line, sizeof(line), "Word %d of %d", s_sel_word + 1, s_nwords);
-        font_draw_string(c, 12, py + 8, &font_small, line, THEME_TEXT);
-        // Match legend counts: good / unsure / flagged.
-        int ng = 0, nu = 0, nb = 0;
-        for (int i = 0; i < s_nwords; i++) {
+        int ng = 0;
+        for (int i = 0; i < s_nwords; i++)
             if (s_words[i].verdict == RECITE_GOOD) ng++;
-            else if (s_words[i].verdict == RECITE_UNSURE) nu++;
-            else nb++;
-        }
-        snprintf(line, sizeof(line), "%d ok  %d unsure  %d flagged", ng, nu, nb);
-        font_draw_string_right(c, CANVAS_WIDTH - 12, py + 10, &font_tiny, line,
-                               THEME_DIM);
-        canvas_rect_fill(c, 12, py + 26, 24, 3, verdict_color(w->verdict));
-        font_draw_string(c, 44, py + 24, &font_tiny, verdict_text(w->verdict),
+        char line[56];
+        if (ng == s_nwords)
+            snprintf(line, sizeof(line), "MashaAllah - all matched");
+        else
+            snprintf(line, sizeof(line), "%d/%d matched - review", ng, s_nwords);
+        font_draw_string(c, 12, py + 8, &font_small, line,
+                         ng == s_nwords ? THEME_ACTIVE : THEME_TEXT);
+        // Selected-word detail, clearly scoped to that word.
+        const ReciteWord *w = &s_words[s_sel_word];
+        canvas_rect_fill(c, 12, py + 28, 24, 3, verdict_color(w->verdict));
+        snprintf(line, sizeof(line), "word %d: %s", s_sel_word + 1,
+                 verdict_text(w->verdict));
+        font_draw_string(c, 44, py + 26, &font_tiny, line,
                          verdict_color(w->verdict));
-        font_draw_string(c, 12, py + 42, &font_tiny,
+        font_draw_string(c, 12, py + 44, &font_tiny,
                          "similarity only - not a tajweed judgement", THEME_DIM);
         break;
     }

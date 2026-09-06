@@ -227,13 +227,13 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
         o->score = cnt ? (float)(sum / cnt) : 99.f;
         o->user_start_ms = (jb >= ja) ? (uint32_t)ja * FRAME_MS : 0;
         o->user_end_ms   = (jb >= ja) ? (uint32_t)(jb + 1) * FRAME_MS : 0;
-        // Missing = the mapped stretch is mostly silence, OR it contains far
-        // less voiced time than the reference word runs (a skipped word gets
-        // its ref frames squeezed onto a sliver of neighboring audio — the
-        // temporal signature; tolerates up to ~4x-faster-than-ref delivery).
-        int min_voiced = (fb - fa + 1) / 4;
-        o->verdict = (cnt == 0 || span == 0 || voiced * 3 < span ||
-                      voiced < min_voiced)
+        // Missing = the mapped stretch is mostly SILENCE. Deliberately not a
+        // duration test: connected recitation ("alhamdu-lillahi") blends
+        // words, and a fast take squeezes some words to slivers of voiced
+        // audio — that's merged delivery, not a skipped word. Flagging it
+        // "not heard" was a field bug; V1 prefers missing a real skip over
+        // flagging correct recitation.
+        o->verdict = (cnt == 0 || span == 0 || voiced * 3 < span)
                          ? RECITE_MISSING : RECITE_GOOD;   // grade below
     }
 
