@@ -294,6 +294,23 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
     s_wsum = 0;
     for (int d = 0; d < N_FEAT; d++) s_wsum += feat_w(d);
 
+    // GLOBAL tempo normalization: resample the user's frame sequence to the
+    // reference's length before aligning. Field data: a fluent user recites
+    // 2.5-3.5x faster than the murattal reference, which the slope-limited
+    // DTW (max 2x local warp) structurally cannot align — every take came
+    // back "couldn't judge". Overall pace is not an error; after removing
+    // it, the slope limits govern only LOCAL deviations, as intended.
+    // map[] carries each normalized frame back to its original index so the
+    // reported user spans stay on the recording's real timeline.
+    int map[MAX_FRAMES];
+    Frame *ur = malloc(sizeof(Frame) * rn);
+    if (!ur) { free(rf); return false; }
+    for (int k = 0; k < rn; k++) {
+        map[k] = (int)((int64_t)k * un / rn);
+        ur[k] = uf[map[k]];
+    }
+    int un_n = rn;   // normalized user length
+
     // Constrained DTW: Sakoe-Chiba band around the length-scaled diagonal +
     // slope-limited steps {(1,1),(1,2),(2,1)} so the local warp stays within
     // 0.5-2x, with a small penalty on the warping steps. The aligner can now
@@ -301,17 +318,17 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
     // reference frames onto slivers of audio — failure itself is a verdict
     // ("couldn't align").
     const float INF = 1e30f;
-    float *cost = malloc(sizeof(float) * rn * un);
-    uint8_t *bp = malloc((size_t)rn * un);
-    if (!cost || !bp) { free(cost); free(bp); free(rf); return false; }
-#define C(i, j) cost[(i) * un + (j)]
-    for (int i = 0; i < rn * un; i++) cost[i] = INF;
+    float *cost = malloc(sizeof(float) * rn * un_n);
+    uint8_t *bp = malloc((size_t)rn * un_n);
+    if (!cost || !bp) { free(cost); free(bp); free(ur); free(rf); return false; }
+#define C(i, j) cost[(i) * un_n + (j)]
+    for (int i = 0; i < rn * un_n; i++) cost[i] = INF;
     for (int i = 0; i < rn; i++) {
-        int jc = (int)((int64_t)i * un / rn);
+        int jc = i;   // tempo-normalized: the diagonal is 1:1
         int jlo = jc - DTW_BAND < 0 ? 0 : jc - DTW_BAND;
-        int jhi = jc + DTW_BAND >= un ? un - 1 : jc + DTW_BAND;
+        int jhi = jc + DTW_BAND >= un_n ? un_n - 1 : jc + DTW_BAND;
         for (int j = jlo; j <= jhi; j++) {
-            float d = fdist(&rf[i], &uf[j]);
+            float d = fdist(&rf[i], &ur[j]);
             if (i == 0 && j == 0) { C(0, 0) = d; bp[0] = 0; continue; }
             float best = INF;
             uint8_t dir = 0;
@@ -324,13 +341,13 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
             if (dir) { C(i, j) = best + d; bp[i * un + j] = dir; }
         }
     }
-    bool aligned = C(rn - 1, un - 1) < INF / 2;
+    bool aligned = C(rn - 1, un_n - 1) < INF / 2;
 
     // Backtrack: for each ref frame, the user frame range it aligned to.
     int lo[MAX_FRAMES], hi[MAX_FRAMES];
-    for (int i = 0; i < rn; i++) { lo[i] = un; hi[i] = -1; }
+    for (int i = 0; i < rn; i++) { lo[i] = un_n; hi[i] = -1; }
     if (aligned) {
-        int i = rn - 1, j = un - 1;
+        int i = rn - 1, j = un_n - 1;
         while (1) {
             if (j < lo[i]) lo[i] = j;
             if (j > hi[i]) hi[i] = j;
@@ -351,7 +368,7 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
     if (!aligned) {
         for (int w = 0; w < n_words; w++)
             out[w] = (ReciteWord){ RECITE_UNCLEAR, 98.f, 0, 0 };
-        free(cost); free(bp); free(rf);
+        free(cost); free(bp); free(ur); free(rf);
         return true;
     }
 
@@ -370,23 +387,24 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
 
         float dl[MAX_FRAMES];
         int cnt = 0, voiced = 0, span = 0;
-        int ja = un, jb = -1;
+        int ja = un_n, jb = -1;
         for (int i = fa; i <= fb; i++) {
             if (hi[i] < 0) continue;
             if (lo[i] < ja) ja = lo[i];
             if (hi[i] > jb) jb = hi[i];
             for (int j = lo[i]; j <= hi[i]; j++) {
-                if (uf[j].raw_db <= usr_floor) continue;   // pause, not speech
-                if (cnt < MAX_FRAMES) dl[cnt++] = fdist(&rf[i], &uf[j]);
+                if (ur[j].raw_db <= usr_floor) continue;   // pause, not speech
+                if (cnt < MAX_FRAMES) dl[cnt++] = fdist(&rf[i], &ur[j]);
             }
         }
         if (jb >= ja)
             for (int j = ja; j <= jb; j++, span++)
-                if (uf[j].raw_db > usr_floor) voiced++;
+                if (ur[j].raw_db > usr_floor) voiced++;
 
         ReciteWord *o = &out[w];
-        o->user_start_ms = (jb >= ja) ? (uint32_t)ja * FRAME_MS : 0;
-        o->user_end_ms   = (jb >= ja) ? (uint32_t)(jb + 1) * FRAME_MS : 0;
+        // Spans mapped back to the recording's real timeline.
+        o->user_start_ms = (jb >= ja) ? (uint32_t)map[ja] * FRAME_MS : 0;
+        o->user_end_ms   = (jb >= ja) ? (uint32_t)(map[jb] + 1) * FRAME_MS : 0;
         if (jb < ja) {   // word never visited by the path: can't judge it
             o->verdict = RECITE_UNCLEAR;
             o->score = 98.f;
@@ -413,8 +431,7 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
         float ac = 0.65f * (float)mean + 0.35f * p90;
 
         float ratio_l = (float)(jb - ja + 1) / (float)(fb - fa + 1);
-        float ratio_g = (float)un / (float)rn;
-        float wr = fabsf(log2f(ratio_l / ratio_g));
+        float wr = fabsf(log2f(ratio_l));   // tempo-normalized: global = 1:1
         float wp = WARP_GAIN * wr;
         if (wp > 0.9f) wp = 0.9f;
 
@@ -459,6 +476,6 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
         }
     }
 
-    free(cost); free(bp); free(rf);
+    free(cost); free(bp); free(ur); free(rf);
     return true;
 }

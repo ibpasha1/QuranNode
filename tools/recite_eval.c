@@ -97,24 +97,38 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s <ref.mp3> <timings.qtm> <ayah> <take.wav...>\n", argv[0]);
         return 2;
     }
-    drmp3_config cfg; drmp3_uint64 frames;
-    float *fpcm = drmp3_open_file_and_read_pcm_frames_f32(argv[1], &cfg, &frames, NULL);
-    if (!fpcm) { fprintf(stderr, "mp3 decode failed: %s\n", argv[1]); return 1; }
-    int16_t *ref = malloc(frames * 2);
-    for (drmp3_uint64 i = 0; i < frames; i++) {
-        float s = 0;
-        for (unsigned c = 0; c < cfg.channels; c++) s += fpcm[i * cfg.channels + c];
-        s /= cfg.channels;
-        if (s > 1.f) s = 1.f; else if (s < -1.f) s = -1.f;
-        ref[i] = (int16_t)(s * 32767.f);
+    // Reference: MP3, or a WAV (e.g. one of the user's own takes as a
+    // self-reference — same voice + style, so distances measure content).
+    int16_t *ref;
+    drmp3_uint64 frames;
+    uint32_t ref_hz;
+    size_t alen = strlen(argv[1]);
+    if (alen > 4 && !strcmp(argv[1] + alen - 4, ".wav")) {
+        uint32_t n;
+        ref = load_wav(argv[1], &n, &ref_hz);
+        if (!ref) { fprintf(stderr, "wav load failed: %s\n", argv[1]); return 1; }
+        frames = n;
+    } else {
+        drmp3_config cfg;
+        float *fpcm = drmp3_open_file_and_read_pcm_frames_f32(argv[1], &cfg, &frames, NULL);
+        if (!fpcm) { fprintf(stderr, "mp3 decode failed: %s\n", argv[1]); return 1; }
+        ref = malloc(frames * 2);
+        for (drmp3_uint64 i = 0; i < frames; i++) {
+            float s = 0;
+            for (unsigned c = 0; c < cfg.channels; c++) s += fpcm[i * cfg.channels + c];
+            s /= cfg.channels;
+            if (s > 1.f) s = 1.f; else if (s < -1.f) s = -1.f;
+            ref[i] = (int16_t)(s * 32767.f);
+        }
+        drmp3_free(fpcm, NULL);
+        ref_hz = cfg.sampleRate;
     }
-    drmp3_free(fpcm, NULL);
 
     WordTiming wt[64];
     int nw = load_timings(argv[2], atoi(argv[3]), wt, 64);
     if (nw <= 0) { fprintf(stderr, "timings load failed (%d)\n", nw); return 1; }
     fprintf(stderr, "ref %.1fs @%uHz, %d words\n",
-            (double)frames / cfg.sampleRate, cfg.sampleRate, nw);
+            (double)frames / ref_hz, ref_hz, nw);
 
     static const char *V[] = { "GOOD", "UNSURE", "MISMATCH", "MISSING", "UNCLEAR" };
     printf("file,word,verdict,score,user_start_ms,user_end_ms\n");
@@ -150,7 +164,7 @@ int main(int argc, char **argv)
             }
         }
         ReciteWord out[64];
-        if (!recite_analyze(ref, (uint32_t)frames, cfg.sampleRate,
+        if (!recite_analyze(ref, (uint32_t)frames, ref_hz,
                             usr, un, uhz, wt, nw, out)) {
             fprintf(stderr, "analyze failed: %s\n", argv[a]);
             free(usr_base);

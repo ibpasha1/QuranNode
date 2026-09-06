@@ -329,21 +329,15 @@ static void run_analysis(void)
     if (a >= b) { a = 0; b = s_rec_n; }
     s_rec_off_ms = a * 1000u / MIC_HZ;
 
-    // Coverage gate: a fragment take (a syllable or two against a whole
-    // ayah) can't be graded word-by-word — DTW would cram every reference
-    // word onto slivers of the same burst and score them "green". Under
-    // ~1/4 of the reference duration (Abdul Basit's murattal is slow, so
-    // genuine fast recitation still clears this) or under 1.2s absolute:
-    // don't grade, ask for the full ayah.
+    // Coverage gate: a grunt (a syllable or two) can't be graded word-by-
+    // word. ABSOLUTE floor only — field data shows fluent recitation runs
+    // 2.5-3.5x faster than the murattal reference (a full sincere take can
+    // be 1.2s of voice), so any ratio-based gate rejects honest takes; the
+    // tempo-normalized aligner handles pace, and real grunts are <0.9s.
     {
         uint32_t voiced_ms = (s_voice_b - s_voice_a) / (MIC_HZ / 1000);
-        uint32_t ref_ms = s_ref_hz ? (uint32_t)((uint64_t)s_ref_n * 1000 /
-                                                s_ref_hz) : 0;
-        if (ref_ms == 0) {
-            // Reference decode failed — fall through; grading handles it.
-        } else if (voiced_ms < ref_ms / 4 || voiced_ms < 1200) {
-            QN_LOGI("TEACHER", "too short: voiced=%ums ref=%ums — not grading",
-                    voiced_ms, ref_ms);
+        if (voiced_ms < 900) {
+            QN_LOGI("TEACHER", "too short: voiced=%ums — not grading", voiced_ms);
             s_ready_hint = "Too short - recite the whole ayah";
             s_state = TEA_READY;
             return;
