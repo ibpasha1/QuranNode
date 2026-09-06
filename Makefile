@@ -48,6 +48,13 @@ loop-test:
 	      core/quran/timing.c -o quran-loop-test -lm
 	./quran-loop-test
 
+# Host-side batch evaluator: replay labeled training WAVs (from the teacher's
+# TRAIN mode) through recite_analyze against the real reference + timings.
+recite-eval:
+	$(CC) -std=c11 -O2 $(INCLUDES) -Ihal/sim/vendor tools/recite_eval.c \
+	      core/audio/recite.c -o quran-recite-eval -lm
+	@echo "built ./quran-recite-eval"
+
 # Link with the C++ driver (pulls in libc++ for the SoundTouch TU).
 $(BIN): $(OBJS)
 	$(CXX) $(OBJS) -o $@ $(LDFLAGS)

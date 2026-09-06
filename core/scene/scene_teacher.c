@@ -36,12 +36,45 @@
 typedef enum {
     TEA_READY,      // ayah loaded; prompt to listen
     TEA_LISTEN,     // teacher playing the ayah
-    TEA_RECITE,     // mic open, user reciting
+    TEA_RECITE,     // mic open, user reciting (practice OR training capture)
     TEA_ANALYZE,    // one-tick analysis pass
     TEA_REVIEW,     // per-word verdicts on the Arabic; word nav + playback
+    TEA_TRAIN,      // training-capture prompt (label + take number)
     TEA_NO_MIC,     // platform has no microphone
     TEA_NO_DATA,    // ayah has no audio/timing in the bundle
 } TeaState;
+
+// --- Training capture (labeled dataset for algorithm tuning) ---------------
+// A scripted sequence of takes: recite each prompt, the recording is written
+// straight to the SD card as a labeled WAV (state/train_NN_label.wav) with NO
+// analysis in between — speak, pause, next. The host-side batch evaluator
+// (tools/recite_eval.c) then replays the whole dataset against any tweak of
+// the scoring algorithm offline.
+static const struct { const char *label; const char *tag; int count; } TRAIN[] = {
+    { "Sincere - best effort",      "sincere",   5 },
+    { "Sincere - fast",             "fast",      5 },
+    { "Gibberish - same rhythm",    "gibberish", 5 },
+    { "SKIP word 2, rest correct",  "skipw2",    3 },
+    { "Recite 1:3's words instead", "wrongayah", 2 },
+};
+#define TRAIN_PHASES ((int)(sizeof(TRAIN) / sizeof(TRAIN[0])))
+#define TRAIN_TOTAL  20
+static int s_train = -1;   // -1 = practice mode; else take index 0..TOTAL-1
+
+static void train_label(int take, const char **label, char *tag, int tagsz)
+{
+    int acc = 0;
+    for (int p = 0; p < TRAIN_PHASES; p++) {
+        if (take < acc + TRAIN[p].count) {
+            *label = TRAIN[p].label;
+            snprintf(tag, tagsz, "%s", TRAIN[p].tag);
+            return;
+        }
+        acc += TRAIN[p].count;
+    }
+    *label = "?";
+    tag[0] = 0;
+}
 
 static TeaState s_state;
 static int  s_surah = 1, s_ayah = 1;
@@ -117,7 +150,9 @@ static void load_ayah(int surah, int ayah)
 
 static void on_enter(void)
 {
-    if (!s_rec) s_rec = malloc(REC_MAX_N * sizeof(int16_t));
+    // +64B slop: the training saver shifts the PCM right to prepend a WAV
+    // header in place (single-buffer hal_state_save).
+    if (!s_rec) s_rec = malloc(REC_MAX_N * sizeof(int16_t) + 64);
     if (!s_ref) s_ref = malloc(REF_MAX_N * sizeof(int16_t));
     ResumePoint r = progress_has_resume() ? progress_resume()
                                           : (ResumePoint){ 1, 1, 1.0f };
@@ -128,6 +163,7 @@ static void on_leave(void)
 {
     hal_mic_stop();
     hal_pcm_stop();
+    s_train = -1;
     if (s_clip) { hal_audio_close(s_clip); s_clip = NULL; }
     if (s_timing_ok) { timing_close(&s_timing); s_timing_ok = false; }
     // Keep s_rec/s_ref/pack resident: re-entry is common, sim/PSRAM have room.
@@ -165,14 +201,60 @@ static void start_recite(void)
     s_state = TEA_RECITE;
 }
 
-static void finish_recite(void)
+// Save the whole (untrimmed) take as a 16k mono WAV named by take + label —
+// untrimmed on purpose: offline tuning can then re-run endpointing too.
+static void train_save_take(void)
 {
-    hal_mic_stop();
-    if (!s_heard) {          // nothing to analyze — back to the prompt
-        s_ready_hint = "Didn't hear you - try again";
+    const char *label; char tag[16];
+    train_label(s_train, &label, tag, sizeof(tag));
+    char name[48];
+    snprintf(name, sizeof(name), "train_%02d_%s.wav", s_train + 1, tag);
+
+    uint32_t bytes = s_rec_n * sizeof(int16_t);
+    uint8_t *raw = (uint8_t *)s_rec;
+    memmove(raw + 44, raw, bytes);
+    memcpy(raw, "RIFF", 4);
+    uint32_t v = 36 + bytes;           memcpy(raw + 4, &v, 4);
+    memcpy(raw + 8, "WAVEfmt ", 8);
+    v = 16;                            memcpy(raw + 16, &v, 4);
+    uint16_t h = 1;                    memcpy(raw + 20, &h, 2);   // PCM
+    h = 1;                             memcpy(raw + 22, &h, 2);   // mono
+    v = MIC_HZ;                        memcpy(raw + 24, &v, 4);
+    v = MIC_HZ * 2;                    memcpy(raw + 28, &v, 4);
+    h = 2;                             memcpy(raw + 32, &h, 2);
+    h = 16;                            memcpy(raw + 34, &h, 2);
+    memcpy(raw + 36, "data", 4);
+    memcpy(raw + 40, &bytes, 4);
+    bool ok = hal_state_save(name, raw, 44 + bytes);
+    QN_LOGI("TEACHER", "train take %d (%s): %ums -> state/%s %s",
+            s_train + 1, tag, s_rec_n / (MIC_HZ / 1000), name,
+            ok ? "saved" : "SAVE FAILED");
+    s_rec_n = 0;   // buffer content was shifted; recording is consumed
+
+    if (!ok) {
+        s_ready_hint = "SD write failed";
+        s_train = -1;
         s_state = TEA_READY;
         return;
     }
+    if (++s_train >= TRAIN_TOTAL) {
+        s_train = -1;
+        s_ready_hint = "20 takes saved: state/train_*.wav";
+        s_state = TEA_READY;
+        return;
+    }
+    s_state = TEA_TRAIN;
+}
+
+static void finish_recite(void)
+{
+    hal_mic_stop();
+    if (!s_heard) {          // nothing captured — back to the prompt
+        s_ready_hint = "Didn't hear you - try again";
+        s_state = (s_train >= 0) ? TEA_TRAIN : TEA_READY;
+        return;
+    }
+    if (s_train >= 0) { train_save_take(); return; }
     s_state = TEA_ANALYZE;   // next tick runs the analysis
 }
 
@@ -443,16 +525,43 @@ static void on_render(Canvas *c)
     case TEA_RECITE: {
         draw_ayah_marked(c, band_top, band_bot, false);
         int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 52;
-        // The endpointer drives the flow: recite, pause, it analyzes itself.
-        font_draw_string_centered(c, iy, &font_medium,
-                                  s_heard ? "HEARING YOU" : "RECITE",
-                                  s_heard ? THEME_ACTIVE : THEME_BADGE);
-        font_draw_string_centered(c, iy + 26, &font_tiny,
-                                  s_heard ? "pause when you finish - I'll notice"
-                                          : "go ahead - I'm listening",
-                                  THEME_DIM);
+        if (s_train >= 0) {   // training capture: show what to perform
+            const char *label; char tag[16];
+            train_label(s_train, &label, tag, sizeof(tag));
+            char t[40];
+            snprintf(t, sizeof(t), "TAKE %d/%d - %s", s_train + 1, TRAIN_TOTAL,
+                     s_heard ? "hearing you" : "go");
+            font_draw_string_centered(c, iy, &font_small, t,
+                                      s_heard ? THEME_ACTIVE : THEME_BADGE);
+            font_draw_string_centered(c, iy + 20, &font_tiny, label, THEME_TEXT);
+        } else {
+            // The endpointer drives the flow: recite, pause, it analyzes.
+            font_draw_string_centered(c, iy, &font_medium,
+                                      s_heard ? "HEARING YOU" : "RECITE",
+                                      s_heard ? THEME_ACTIVE : THEME_BADGE);
+            font_draw_string_centered(c, iy + 26, &font_tiny,
+                                      s_heard ? "pause when you finish - I'll notice"
+                                              : "go ahead - I'm listening",
+                                      THEME_DIM);
+        }
         // Live mic meter.
         theme_meter(c, 40, iy + 38, CANVAS_WIDTH - 80, 8, s_level);
+        break;
+    }
+
+    case TEA_TRAIN: {
+        draw_ayah_marked(c, band_top, band_bot, false);
+        int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 64;
+        const char *label; char tag[16];
+        train_label(s_train, &label, tag, sizeof(tag));
+        char t[32];
+        snprintf(t, sizeof(t), "TRAINING  %d / %d", s_train + 1, TRAIN_TOTAL);
+        font_draw_string_centered(c, iy, &font_small, t, THEME_TITLE);
+        font_draw_string_centered(c, iy + 20, &font_small, label, THEME_TEXT);
+        font_draw_string_centered(c, iy + 40, &font_tiny,
+                                  s_ready_hint ? s_ready_hint
+                                               : "OK records - it saves and moves on",
+                                  s_ready_hint ? THEME_BADGE : THEME_DIM);
         break;
     }
 
@@ -496,10 +605,20 @@ static void on_render(Canvas *c)
     // Keybar per state.
     switch (s_state) {
     case TEA_READY: {
-        KeyChip k[3] = {
+        KeyChip k[4] = {
             { "OK", "LISTEN", 3, { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
             { "^v", "AYAH", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN, INPUT_ENC_CW, INPUT_ENC_CCW } },
+            { "MD", "TRAIN", 1, { INPUT_BTN_MODE } },
             { "BK", "HOME", 1, { INPUT_BTN_BACK } },
+        };
+        theme_keybar(c, k, 4);
+        break;
+    }
+    case TEA_TRAIN: {
+        KeyChip k[3] = {
+            { "OK", "RECORD", 3, { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
+            { "^v", "SKIP/REDO", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN, INPUT_ENC_CW, INPUT_ENC_CCW } },
+            { "BK", "EXIT", 1, { INPUT_BTN_BACK } },
         };
         theme_keybar(c, k, 3);
         break;
@@ -568,7 +687,34 @@ static void on_input(InputEvent e)
             hal_audio_click(true); start_listen(); break;
         case INPUT_NAV_UP: case INPUT_ENC_CCW: change_ayah(-1); break;
         case INPUT_NAV_DOWN: case INPUT_ENC_CW: change_ayah(+1); break;
+        case INPUT_BTN_MODE:   // enter training capture
+            hal_audio_click(true);
+            s_train = 0;
+            s_ready_hint = NULL;
+            s_state = TEA_TRAIN;
+            break;
         case INPUT_BTN_BACK: scene_switch(SCENE_HOME); break;
+        default: break;
+        }
+        break;
+
+    case TEA_TRAIN:
+        switch (e.type) {
+        case INPUT_NAV_SELECT: case INPUT_ENC_PUSH: case INPUT_BTN_PLAY:
+            start_recite(); break;   // finish_recite saves + advances
+        case INPUT_NAV_UP: case INPUT_ENC_CCW:
+            if (s_train > 0) { s_train--; hal_audio_click(false); }
+            s_ready_hint = NULL;
+            break;
+        case INPUT_NAV_DOWN: case INPUT_ENC_CW:
+            if (s_train < TRAIN_TOTAL - 1) { s_train++; hal_audio_click(false); }
+            s_ready_hint = NULL;
+            break;
+        case INPUT_BTN_BACK:
+            s_train = -1;
+            s_ready_hint = NULL;
+            s_state = TEA_READY;
+            break;
         default: break;
         }
         break;
@@ -588,7 +734,9 @@ static void on_input(InputEvent e)
         case INPUT_NAV_SELECT: case INPUT_ENC_PUSH: case INPUT_BTN_PLAY:
             hal_audio_click(true); finish_recite(); break;
         case INPUT_BTN_BACK:
-            hal_mic_stop(); s_state = TEA_READY; break;
+            hal_mic_stop();
+            s_state = (s_train >= 0) ? TEA_TRAIN : TEA_READY;
+            break;
         default: break;
         }
         break;
