@@ -58,11 +58,22 @@ void prefs_save(void)
     hal_state_save("prefs", &b, sizeof(b));
 }
 
+float prefs_volume_gain(void)
+{
+    if (g_prefs.volume == 0) return 0.0f;
+    float f = g_prefs.volume / 100.0f;
+    // Cubic taper approximates perceived loudness: 100% -> 2.0x (line-out is
+    // quiet), 70% -> 0.69x, 50% -> 0.25x, 20% -> 0.016x. Every slider step
+    // is audible, unlike the old linear map where 100->50% was a barely
+    // perceptible -6dB (field report: "it doesn't actually lower").
+    return 2.0f * f * f * f;
+}
+
 void prefs_apply(void)
 {
     hal_set_brightness(g_prefs.brightness);
     player_set_rate(&g_player, g_prefs.rate);
-    hal_audio_set_volume(g_prefs.volume / 100.0f * 2.0f);   // 100% -> 2.0x, 90% -> 1.8x
+    hal_audio_set_volume(prefs_volume_gain());
     hal_audio_set_output(g_prefs.output);
 }
 

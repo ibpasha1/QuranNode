@@ -29,6 +29,12 @@ void prefs_init(void);    // load persisted prefs (or defaults) and apply them
 void prefs_save(void);    // persist current prefs
 void prefs_apply(void);   // push brightness -> HAL, rate -> shared player
 
+// The HAL gain for the current volume preference — a perceptual (cubic)
+// curve, not linear: linear amplitude halving is only -6dB, so most of a
+// linear slider does nothing audible (and at high gain everything clips to
+// the same loudness anyway). 0 = true mute.
+float prefs_volume_gain(void);
+
 // The reader glyph pack path for the current font size, e.g. "packs/reader_md.qgp".
 const char *prefs_font_pack(int surah);   // per-surah pack, e.g. "packs/reader_lg/78.qgp"
 const char *prefs_font_name(void);       // "Small" ... "Huge"

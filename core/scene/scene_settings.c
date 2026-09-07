@@ -33,7 +33,7 @@ static void adjust(int dir)
         if (v < 0) v = 0;
         if (v > 100) v = 100;
         g_prefs.volume = (uint8_t)v;
-        hal_audio_set_volume(g_prefs.volume / 100.0f * 2.0f);
+        hal_audio_set_volume(prefs_volume_gain());
         break;
     }
     case S_OUTPUT:
