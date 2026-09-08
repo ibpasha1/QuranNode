@@ -135,19 +135,34 @@ void hifz_cfg_set_reps(int listen, int echo)
 // -------------------------------------------------------------------------
 #define BODY_OFF offsetof(HifzBlob, scope)
 
+// Just enough of the head to compare write sequence. Peeking this instead of
+// loading both slots in full is what keeps init to ONE resident blob — four
+// copies of a 15 KB struct cost 60 KB of an ESP32's 320 KB.
+typedef struct { uint32_t magic; uint16_t version, bytes; uint32_t seq; } SlotHdr;
+
+static bool slot_seq(const char *name, uint32_t *out)
+{
+    SlotHdr h;
+    size_t got = 0;
+    if (!hal_state_load(name, &h, sizeof h, &got)) return false;
+    if (got < sizeof h || h.magic != HIFZ_MAGIC) return false;
+    *out = h.seq;
+    return true;
+}
+
+// Loads straight into `dst` — no scratch copy. On failure dst is left zeroed
+// past whatever was read, and the caller falls back to the other slot.
 static bool load_slot(const char *name, HifzBlob *dst)
 {
-    static HifzBlob t;   // static: 15 KB would blow the ESP32 task stack
-    memset(&t, 0, sizeof t);
+    memset(dst, 0, sizeof *dst);
     size_t got = 0;
-    if (!hal_state_load(name, &t, sizeof t, &got)) return false;
-    if (got < BODY_OFF + sizeof t.strength) return false;
-    if (t.magic != HIFZ_MAGIC) return false;
-    if (t.bytes < BODY_OFF || t.bytes > got) return false;   // truncated write
-    if (crc32((const uint8_t *)&t + BODY_OFF, t.bytes - BODY_OFF) != t.crc)
+    if (!hal_state_load(name, dst, sizeof *dst, &got)) return false;
+    if (got < BODY_OFF + sizeof dst->strength) return false;
+    if (dst->magic != HIFZ_MAGIC) return false;
+    if (dst->bytes < BODY_OFF || dst->bytes > got) return false;   // truncated
+    if (crc32((const uint8_t *)dst + BODY_OFF, dst->bytes - BODY_OFF) != dst->crc)
         return false;
-    *dst = t;   // tail beyond t.bytes stays zeroed => older blobs upgrade
-    return true;
+    return true;   // tail beyond dst->bytes stayed zeroed => older blobs upgrade
 }
 
 static void persist(void)
@@ -166,14 +181,20 @@ void hifz_flush(void) { if (s_dirty) persist(); }
 
 void hifz_init(void)
 {
-    static HifzBlob a, b;   // static for the same stack reason as load_slot
-    bool oka = load_slot("hifz.a", &a);
-    bool okb = load_slot("hifz.b", &b);
+    // Pick the newer slot by header, load only that one, and fall back to the
+    // other if it fails validation (that's the torn-write case).
+    uint32_t sa = 0, sb = 0;
+    bool ha = slot_seq("hifz.a", &sa), hb = slot_seq("hifz.b", &sb);
+    const char *first = NULL, *second = NULL;
+    if (ha && hb) {
+        first  = (sa >= sb) ? "hifz.a" : "hifz.b";
+        second = (sa >= sb) ? "hifz.b" : "hifz.a";
+    } else if (ha) first = "hifz.a";
+    else if (hb)   first = "hifz.b";
 
-    if (oka && okb)  s_b = (a.seq >= b.seq) ? a : b;
-    else if (oka)    s_b = a;
-    else if (okb)    s_b = b;
-    else {
+    bool ok = first && load_slot(first, &s_b);
+    if (!ok && second) ok = load_slot(second, &s_b);
+    if (!ok) {
         memset(&s_b, 0, sizeof s_b);
         s_b.magic = HIFZ_MAGIC;
         s_b.version = HIFZ_VERSION;

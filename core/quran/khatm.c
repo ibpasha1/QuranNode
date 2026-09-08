@@ -206,19 +206,32 @@ static void day_add(int day, int ayat, uint32_t mpages)
 // -------------------------------------------------------------------------
 #define BODY_OFF offsetof(KhatmBlob, read)
 
+// Just enough of the head to compare write sequence, so init never holds two
+// blobs at once (see khatm_init).
+typedef struct { uint32_t magic; uint16_t version, bytes; uint32_t seq; } SlotHdr;
+
+static bool slot_seq(const char *name, uint32_t *out)
+{
+    SlotHdr h;
+    size_t got = 0;
+    if (!hal_state_load(name, &h, sizeof h, &got)) return false;
+    if (got < sizeof h || h.magic != KHATM_MAGIC) return false;
+    *out = h.seq;
+    return true;
+}
+
+// Loads straight into `dst` — no scratch copy.
 static bool load_slot(const char *name, KhatmBlob *dst)
 {
-    static KhatmBlob t;   // static: 2.4KB is too much for an ESP32 task stack
-    memset(&t, 0, sizeof t);
+    memset(dst, 0, sizeof *dst);
     size_t got = 0;
-    if (!hal_state_load(name, &t, sizeof t, &got)) return false;
-    if (got < BODY_OFF + sizeof t.read) return false;   // too short to be useful
-    if (t.magic != KHATM_MAGIC) return false;
-    if (t.bytes < BODY_OFF || t.bytes > got) return false;   // truncated write
-    if (crc32((const uint8_t *)&t + BODY_OFF, t.bytes - BODY_OFF) != t.crc)
+    if (!hal_state_load(name, dst, sizeof *dst, &got)) return false;
+    if (got < BODY_OFF + sizeof dst->read) return false;   // too short to be useful
+    if (dst->magic != KHATM_MAGIC) return false;
+    if (dst->bytes < BODY_OFF || dst->bytes > got) return false;   // truncated
+    if (crc32((const uint8_t *)dst + BODY_OFF, dst->bytes - BODY_OFF) != dst->crc)
         return false;
-    *dst = t;   // any tail beyond t.bytes stays zeroed => older blobs upgrade
-    return true;
+    return true;   // tail beyond dst->bytes stayed zeroed => older blobs upgrade
 }
 
 static void persist(void)
@@ -254,14 +267,21 @@ static void recount(void)
 
 void khatm_init(void)
 {
-    KhatmBlob a, b;
-    bool oka = load_slot("khatm.a", &a);
-    bool okb = load_slot("khatm.b", &b);
+    // Pick the newer slot by header, load only that one, fall back to the other
+    // if it fails validation (the torn-write case). Loading both in full would
+    // put two more blobs on the stack for no benefit.
+    uint32_t sa = 0, sb = 0;
+    bool ha = slot_seq("khatm.a", &sa), hb = slot_seq("khatm.b", &sb);
+    const char *first = NULL, *second = NULL;
+    if (ha && hb) {
+        first  = (sa >= sb) ? "khatm.a" : "khatm.b";
+        second = (sa >= sb) ? "khatm.b" : "khatm.a";
+    } else if (ha) first = "khatm.a";
+    else if (hb)   first = "khatm.b";
 
-    if (oka && okb)      s_b = (a.seq >= b.seq) ? a : b;
-    else if (oka)        s_b = a;
-    else if (okb)        s_b = b;
-    else {
+    bool ok = first && load_slot(first, &s_b);
+    if (!ok && second) ok = load_slot(second, &s_b);
+    if (!ok) {
         memset(&s_b, 0, sizeof s_b);
         s_b.magic = KHATM_MAGIC;
         s_b.version = KHATM_VERSION;

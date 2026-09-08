@@ -18,6 +18,7 @@ typedef enum {
     SCENE_SETTINGS,   // preferences
     SCENE_TEACHER,    // listen -> recite -> analyze -> review practice loop
     SCENE_PROGRESS,   // khatm: coverage map, daily pace, what to read today
+    SCENE_HIFZ,       // lessons: today's sabaq / sabqi / manzil plan
     SCENE_COUNT,
 } SceneID;
 
