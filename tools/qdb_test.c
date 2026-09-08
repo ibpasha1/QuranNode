@@ -104,8 +104,38 @@ int main(void)
     CHECK(mp_total == 604000UL, "whole mushaf sums to %lu mpages, not 604000",
           mp_total);
 
-    if (fails == 0) printf("qdb-test: all invariants hold (%d ayat, %d pages)\n",
-                           QDB_AYAH_TOTAL, QDB_PAGE_COUNT);
+    // --- word counts -------------------------------------------------------
+    // These must equal the glyph packs' word-box counts, because both come from
+    // the same Uthmani text. tools/qdb_words_check.py verifies that against the
+    // real .qgp files; here we pin the shape and the known landmarks.
+    long total_words = 0;
+    int maxw = 0;
+    for (int s = 1; s <= QDB_SURAH_COUNT; s++) {
+        for (int a = 1; a <= qdb_ayah_count(s); a++) {
+            int n = qdb_word_count(s, a);
+            CHECK(n >= 1, "%d:%d has %d words", s, a, n);
+            total_words += n;
+            if (n > maxw) maxw = n;
+        }
+    }
+    CHECK(total_words == 77878, "total words %ld, expected 77878", total_words);
+    CHECK(maxw == 128, "longest ayah is %d words, expected 128 (2:282)", maxw);
+    CHECK(qdb_word_count(2, 282) == 128, "2:282 is not 128 words");
+    CHECK(qdb_word_count(1, 1) == 4, "1:1 (basmala) is not 4 words");
+    // Ayah 1 of surahs 2..114 carries the basmala prefix; 9 has no basmala.
+    CHECK(qdb_word_count(2, 1) == 5, "2:1 is not 5 words (basmala + alif-lam-mim)");
+    CHECK(qdb_word_count(0, 1) == 0 && qdb_word_count(1, 99) == 0,
+          "invalid refs returned a word count");
+
+    // The agreement check must reject a disagreeing timing count rather than
+    // clamping — a wrong-word mark is worse than no mark.
+    CHECK(qdb_words_agree(2, 1, 5), "2:1 should agree with a matching count");
+    CHECK(!qdb_words_agree(2, 1, 1), "2:1 wrongly agreed with the timing count");
+    CHECK(!qdb_words_agree(0, 0, 0), "invalid ref wrongly agreed");
+
+    if (fails == 0) printf("qdb-test: all invariants hold (%d ayat, %d pages, "
+                           "%ld words)\n", QDB_AYAH_TOTAL, QDB_PAGE_COUNT,
+                           total_words);
     else            printf("qdb-test: %d FAILURES\n", fails);
     return fails != 0;
 }

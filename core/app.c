@@ -3,6 +3,7 @@
 #include "player.h"
 #include "progress.h"
 #include "khatm.h"
+#include "hifz.h"
 #include "prefs.h"
 #include "theme.h"
 #include "tween.h"
@@ -13,6 +14,7 @@ void app_init(void)
     tween_init();
     progress_init();                        // durable resume point + bookmarks
     khatm_init();                           // reading coverage + daily pace
+    hifz_init();                            // memorization: portions + review schedule
     player_init(&g_player, "abdulbasit");   // the shared recitation transport
     prefs_init();                           // speed/font/brightness/tajweed (applies them)
     scene_init();   // starts on the calm Home screen
@@ -22,6 +24,7 @@ void app_tick(uint32_t dt_ms)
 {
     tween_update_all((int)dt_ms);
     khatm_service();     // day rollover + throttled coverage saves
+    hifz_service();      // day rollover + debounced memorization saves
     scene_tick(dt_ms);   // e.g. the reader advances its audio playhead + highlight
 }
 
