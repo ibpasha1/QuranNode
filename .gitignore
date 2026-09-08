@@ -7,6 +7,7 @@ quran-qdb-test
 quran-khatm-test
 quran-hifz-test
 quran-hifz-drill-test
+quran-wbw-test
 tools/.cache/
 
 # Wi-Fi credentials — NEVER commit (see firmware/secrets.ini.example)

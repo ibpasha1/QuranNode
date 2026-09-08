@@ -248,6 +248,43 @@ int font_max_chars(const Font *f, int avail_px)
     return n > 0 ? n : 0;
 }
 
+int font_wrap_lines(const Font *f, const char *text, int max_w,
+                    char out[][FONT_WRAP_LINE_CAP], int max_lines)
+{
+    if (!text || max_lines <= 0) return 0;
+    // Fixed-width font: char count is an exact proxy for pixel width. A line may
+    // hold at most `cap` chars — the smaller of the pixel fit and the buffer.
+    int cap = font_max_chars(f, max_w);
+    if (cap < 1) cap = 1;
+    if (cap > FONT_WRAP_LINE_CAP - 1) cap = FONT_WRAP_LINE_CAP - 1;
+
+    int nlines = 0;
+    char line[FONT_WRAP_LINE_CAP];
+    int llen = 0;
+    const char *p = text;
+    while (*p && nlines < max_lines) {
+        while (*p == ' ') p++;                 // skip a run of spaces
+        const char *w = p;
+        while (*p && *p != ' ') p++;
+        int wlen = (int)(p - w);
+        if (wlen == 0) break;
+        if (wlen > cap) wlen = cap;            // hard-clamp an over-long word
+
+        // Flush the line if the word (plus a joining space) won't fit.
+        if (llen && llen + 1 + wlen > cap) {
+            memcpy(out[nlines], line, llen); out[nlines][llen] = '\0'; nlines++;
+            llen = 0;
+            if (nlines >= max_lines) break;
+        }
+        if (llen) line[llen++] = ' ';
+        memcpy(line + llen, w, wlen); llen += wlen;
+    }
+    if (llen && nlines < max_lines) {
+        memcpy(out[nlines], line, llen); out[nlines][llen] = '\0'; nlines++;
+    }
+    return nlines;
+}
+
 void font_truncate(char *dst, int dst_size, const char *src, const Font *f, int avail_px)
 {
     if (dst_size <= 0) return;

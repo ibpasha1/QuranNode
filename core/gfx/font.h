@@ -31,3 +31,12 @@ void font_draw_string_right(Canvas *c, int x, int y, const Font *f, const char *
 // Pixel-fit helpers — compute character limits from available pixel width
 int font_max_chars(const Font *f, int avail_px);
 void font_truncate(char *dst, int dst_size, const char *src, const Font *f, int avail_px);
+
+// Word-wrap `text` to at most `max_w` px per line. Copies each line
+// (NUL-terminated) into out[i]; returns the number of lines (<= max_lines).
+// Breaks on spaces; a word wider than max_w (or the line cap) is hard-clamped so
+// a line can never overflow. There is no Latin wrap helper elsewhere — the
+// meaning sheet's English glosses need it.
+#define FONT_WRAP_LINE_CAP 48
+int font_wrap_lines(const Font *f, const char *text, int max_w,
+                    char out[][FONT_WRAP_LINE_CAP], int max_lines);
