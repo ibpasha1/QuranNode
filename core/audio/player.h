@@ -52,6 +52,11 @@ typedef struct {
     int   loop_section_i;     // which pass over the range (0-based)
     bool  in_pause;           // currently in an inter-clip pause
     uint32_t pause_until;     // plat_millis() deadline for the pause
+    // Ticks once each time a finite loop (section_reps > 0) runs to completion.
+    // Completion is otherwise unobservable without a race: `playing` stays true
+    // through queue_ayah's inter-clip pause, so a poller can't tell "done" from
+    // "between clips". The drill watches this to advance out of LISTEN/ECHO.
+    uint32_t loop_done_seq;
 } Player;
 
 // The single shared transport instance (reader + loop editor drive the same one).

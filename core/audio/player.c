@@ -151,6 +151,7 @@ static void loop_on_ayah_end(Player *p)
         } else {
             p->loop.active = false;             // loop complete
             p->playing = false;
+            p->loop_done_seq++;                 // observable, race-free
         }
     } else {
         queue_ayah(p, next);

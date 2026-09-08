@@ -82,9 +82,12 @@ int main(void)
     }
 
     int expected = 3 * 2 * 2;   // 3 ayat x each x2 x section x2
-    printf("\nplays completed = %d (expected %d)   loop.active=%d\n",
-           s_completions, expected, p.loop.active);
-    bool ok = (s_completions == expected) && !p.loop.active;
+    printf("\nplays completed = %d (expected %d)   loop.active=%d  done_seq=%u\n",
+           s_completions, expected, p.loop.active, p.loop_done_seq);
+    // A finite loop must tick loop_done_seq exactly once at completion — the
+    // race-free signal the drill relies on to leave LISTEN/ECHO.
+    bool ok = (s_completions == expected) && !p.loop.active &&
+              (p.loop_done_seq == 1);
     printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }
