@@ -16,7 +16,7 @@ static void set_defaults(void)
 {
     g_prefs.rate = 1.0f;
     g_prefs.font_size = FONT_LARGE;
-    g_prefs.brightness = 90;
+    g_prefs.brightness = 55;   // legible but easy on the battery (backlight is the top draw)
     g_prefs.tajweed = 0;
     g_prefs.volume = 90;     // -> ~1.8x gain (line-out is quiet)
     g_prefs.output = 0;      // headphone
