@@ -344,12 +344,24 @@ int hal_score_remote(const uint8_t *wav, uint32_t wav_len, int surah, int ayah,
 }
 
 static bool s_sim_ota = false;
+static uint32_t s_sim_ota_t0 = 0;   // when the pull started, for the phase demo
 void hal_serve_blob(int idx, const char *name, const void *data, size_t len)
 { (void)idx; (void)name; (void)data; (void)len; }   // sim SD works; not needed
-void hal_ota_start(void) { s_sim_ota = true; printf("[sim] OTA update mode (no-op)\n"); }
+void hal_ota_start(void) { s_sim_ota = true; s_sim_ota_t0 = SDL_GetTicks(); printf("[sim] OTA update mode (no-op)\n"); }
 const char *hal_ota_url(void) { return s_sim_ota ? "http://192.168.86.20/" : NULL; }
-void hal_ota_pull(void) { s_sim_ota = true; printf("[sim] OTA pull from GitHub (no-op)\n"); }
-const char *hal_ota_status(void) { return s_sim_ota ? "Downloading update..." : NULL; }
+void hal_ota_pull(void) { s_sim_ota = true; s_sim_ota_t0 = SDL_GetTicks(); printf("[sim] OTA pull from GitHub (no-op)\n"); }
+// Fake a realistic phase progression so the animated overlay can be seen
+// end-to-end in the sim: connect -> download -> done, then loop.
+const char *hal_ota_status(void)
+{
+    if (!s_sim_ota) return NULL;
+    uint32_t e = SDL_GetTicks() - s_sim_ota_t0;
+    if (e < 2500)  return "Connecting to Wi-Fi...";
+    if (e < 7000)  return "Downloading update...";
+    if (e < 9500)  return "Updated! Rebooting...";
+    s_sim_ota_t0 = SDL_GetTicks();   // loop the demo
+    return "Connecting to Wi-Fi...";
+}
 bool hal_ota_boot_check(void) { return false; }   // no auto-update in the sim
 void hal_ota_apply(void) { printf("[sim] OTA apply (no-op)\n"); }
 bool hal_recovery_requested(void) { return false; }
