@@ -471,6 +471,9 @@ uint32_t hifz_drill_rep_remaining(uint32_t now)
     return now < s_rep_deadline ? s_rep_deadline - now : 0;
 }
 
+uint32_t hifz_drill_rep_ms(void) { return s_rep_ms; }
+bool     hifz_drill_is_audio(void) { return s_audio; }
+
 bool hifz_drill_done(void) { return s_phase == DRILL_DONE; }
 
 HifzGrade hifz_drill_portion_grade(void)

@@ -127,6 +127,16 @@ bool glyphpack_at(GlyphPack *gp, int i, AyahGlyphs *out)
     return glyphpack_get(gp, rd_u16(e), rd_u16(e + 2), out);
 }
 
+bool glyphpack_dims(GlyphPack *gp, int surah, int ayah, int *w, int *h)
+{
+    if (!gp->index) return false;
+    const uint8_t *e = find_entry(gp, surah, ayah);
+    if (!e) return false;
+    if (w) *w = rd_u16(e + 8);
+    if (h) *h = rd_u16(e + 10);
+    return true;
+}
+
 bool ayah_word_box(const AyahGlyphs *g, int i, AtWordBox *out)
 {
     if (i < 0 || i >= g->n_words) return false;

@@ -331,6 +331,9 @@ static int draw_seg_ayah(Canvas *c, int surah, int ayah, int wlo, int whi,
     return y + g.h + 8;
 }
 
+#define BAND_GAP 8
+#define BAND_MAX_AYAT 32
+
 static void render_band(Canvas *c, int band_top, int band_bot)
 {
     const HifzSeg *s = hifz_drill_cur_seg();
@@ -347,12 +350,61 @@ static void render_band(Canvas *c, int band_top, int band_bot)
         seg_word_ref(s, surah, s_selw, &sel_ayah, &sel_w);
     }
 
-    int y = band_top;
-    for (int a = s->a0; a <= s->a1 && y < band_bot; a++) {
-        int wlo = (a == s->a0) ? s->w0 : 0;
-        int whi = (a == s->a1) ? s->w1 : qdb_word_count(surah, a) - 1;
-        int hl = (a == sel_ayah) ? sel_w : -1;
-        y = draw_seg_ayah(c, surah, a, wlo, whi, y, ph, vm, vpct, hl);
+    // Measure the stacked segment (index-only — no blob streaming), so a tall
+    // multi-ayah segment can be scrolled instead of overflowing the band.
+    int na = s->a1 - s->a0 + 1;
+    if (na > BAND_MAX_AYAT) na = BAND_MAX_AYAT;
+    int hs[BAND_MAX_AYAT];
+    int content_h = 0;
+    for (int i = 0; i < na; i++) {
+        int w = 0, h = 0;
+        hs[i] = (s_pack_ok && glyphpack_dims(&s_pack, surah, s->a0 + i, &w, &h)) ? h : 0;
+        content_h += hs[i] + BAND_GAP;
+    }
+    if (content_h > 0) content_h -= BAND_GAP;
+    int band_h = band_bot - band_top;
+
+    // Teleprompter scroll so the lower ayat of a tall segment are reachable:
+    // during audio LISTEN follow the playing ayah; while the meaning sheet is
+    // open follow the selected ayah; on a timed rep pan top->bottom at tempo.
+    int scroll = 0;
+    if (content_h > band_h) {
+        int focus = -1;
+        if (s_sheet && sel_ayah >= 0)            focus = sel_ayah - s->a0;
+        else if (ph == DRILL_LISTEN && hifz_drill_is_audio())
+                                                 focus = g_player.ayah - s->a0;
+        if (focus >= 0) {
+            if (focus >= na) focus = na - 1;
+            int off = 0;
+            for (int i = 0; i < focus; i++) off += hs[i] + BAND_GAP;
+            scroll = off - band_h / 3;           // keep the focus in the upper third
+        } else {
+            uint32_t rms = hifz_drill_rep_ms();
+            int reps = hifz_drill_reps(), rep = hifz_drill_rep();
+            float prog = 0.f;
+            if (reps > 0 && rms > 0) {
+                uint32_t rem = hifz_drill_rep_remaining(plat_millis());
+                float inrep = (float)(rms - (rem > rms ? rms : rem)) / (float)rms;
+                prog = ((float)rep + inrep) / (float)reps;
+            }
+            if (prog < 0.f) prog = 0.f;
+            if (prog > 1.f) prog = 1.f;
+            scroll = (int)(prog * (float)(content_h - band_h));
+        }
+        if (scroll < 0) scroll = 0;
+        if (scroll > content_h - band_h) scroll = content_h - band_h;
+    }
+
+    int y = band_top - scroll;
+    for (int i = 0; i < na; i++) {
+        int a = s->a0 + i;
+        if (y + hs[i] > band_top && y < band_bot) {   // cull ayat outside the band
+            int wlo = (a == s->a0) ? s->w0 : 0;
+            int whi = (a == s->a1) ? s->w1 : qdb_word_count(surah, a) - 1;
+            int hl = (a == sel_ayah) ? sel_w : -1;
+            draw_seg_ayah(c, surah, a, wlo, whi, y, ph, vm, vpct, hl);
+        }
+        y += hs[i] + BAND_GAP;
     }
 }
 
@@ -440,11 +492,18 @@ static void on_render(Canvas *c)
     if (s) snprintf(ref, sizeof ref, "%d:%d  seg %d/%d", surah, s->a0,
                     hifz_drill_seg() + 1, hifz_drill_nsegs());
     else   snprintf(ref, sizeof ref, "%d", surah);
-    theme_header(c, "DRILL", THEME_TITLE, ref, THEME_LABEL);
+    int hdr_y = theme_header(c, "DRILL", THEME_TITLE, ref, THEME_LABEL);
 
     int band_top = 34;
     int band_bot = CANVAS_HEIGHT - THEME_KEYBAR_H - 76;
     render_band(c, band_top, band_bot);
+    // Clip the band: a scrolled tall segment can overdraw a partial ayah past
+    // either edge (arabic_draw_ayah only clips to the canvas), so erase the
+    // strips above and below so nothing bleeds into the header or the label.
+    if (band_top > hdr_y)
+        canvas_rect_fill(c, 0, hdr_y, CANVAS_WIDTH, band_top - hdr_y, THEME_BG);
+    canvas_rect_fill(c, 0, band_bot, CANVAS_WIDTH,
+                     (CANVAS_HEIGHT - THEME_KEYBAR_H) - band_bot, THEME_BG);
 
     int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 68;
     if (s_mic == MIC_REC) {

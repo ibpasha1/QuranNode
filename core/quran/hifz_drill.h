@@ -73,6 +73,8 @@ void           hifz_drill_veil(VeilMode *mode, int *pct);
 int            hifz_drill_rep(void);        // current rep (timed phases)
 int            hifz_drill_reps(void);       // total reps this phase
 uint32_t       hifz_drill_rep_remaining(uint32_t now);  // ms left in this rep
+uint32_t       hifz_drill_rep_ms(void);     // a timed rep's full duration
+bool           hifz_drill_is_audio(void);   // LISTEN is playing audio, not timed
 
 // --- input (all pass the frame clock so transitions can arm the timer) ----
 void hifz_drill_grade(HifzGrade g, uint32_t now);  // ASSESS only

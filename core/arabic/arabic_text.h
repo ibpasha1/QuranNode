@@ -74,6 +74,11 @@ bool glyphpack_at(GlyphPack *gp, int i, AyahGlyphs *out);
 // Read word box i (reading order) into *out.
 bool ayah_word_box(const AyahGlyphs *g, int i, AtWordBox *out);
 
+// Read an ayah's pixel dimensions from the resident index WITHOUT streaming its
+// blob — for layout/measurement (e.g. deciding how to scroll a tall segment).
+// Returns false if the ayah isn't in the pack.
+bool glyphpack_dims(GlyphPack *gp, int surah, int ayah, int *w, int *h);
+
 // Blit an ayah's alpha bitmap into the canvas with its top-left at (x, y),
 // tinting the glyph coverage with `color` (alpha-blended over the background).
 // If highlight_word >= 0, that word's box is filled with `hl_color` first so the
