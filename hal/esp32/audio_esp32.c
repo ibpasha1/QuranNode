@@ -5,8 +5,10 @@
 // a time (minimp3) and writes it straight to I2S — real-time, no freeze, tiny
 // memory. hal_audio_open just keeps the file bytes; the decoder runs during
 // playback. Position is the count of decoded frames, so the reader's word
-// highlight follows along. The bundled ayat are 44.1kHz stereo, so frames go to
-// I2S unchanged (mono is up-mixed; other rates play at their native pitch).
+// highlight follows along. Most ayat are 44.1kHz stereo, but a few surahs ship
+// at 22.05kHz (e.g. Al-Baqarah from quranicaudio.com), so the I2S clock is
+// retuned to each stream's real rate on the fly — otherwise a 22.05kHz file
+// clocked out at 44.1kHz plays at 2x speed. Mono is up-mixed to stereo.
 #include "hal.h"
 #include "pin_config.h"
 
@@ -56,6 +58,23 @@ static inline int16_t sat16(int32_t v) { return v > 32767 ? 32767 : (v < -32768 
 static bool s_output_speaker = false;
 
 static void spk(bool on) { gpio_set_level(PIN_AMP_EN, (s_output_speaker && on) ? 1 : 0); }
+
+// The I2S rate currently programmed into the hardware. Retune it to a stream's
+// real sample rate (disable -> reconfig clock -> enable), but only when it
+// actually changes — a no-op call must not glitch steady 44.1kHz playback.
+// Called only from the audio task, so s_out_hz needs no lock.
+static int s_out_hz = OUT_RATE;
+
+static void set_out_rate(int hz)
+{
+    if (hz <= 0 || hz == s_out_hz || !s_i2s_ok) return;
+    i2s_std_clk_config_t clk = I2S_STD_CLK_DEFAULT_CONFIG((uint32_t)hz);
+    if (i2s_channel_disable(s_tx) != ESP_OK) return;
+    esp_err_t e = i2s_channel_reconfig_std_clock(s_tx, &clk);
+    i2s_channel_enable(s_tx);   // re-enable even on failure (stays at old rate)
+    if (e == ESP_OK) { s_out_hz = hz; ESP_LOGI(TAG, "I2S retuned to %dHz", hz); }
+    else             { ESP_LOGE(TAG, "I2S reconfig %dHz failed (%d)", hz, (int)e); }
+}
 
 bool audio_esp32_pcm_pump(void);   // user-recording playback (defined below)
 
@@ -108,6 +127,7 @@ static void audio_task(void *arg)
         xSemaphoreGive(s_mtx);
 
         if (samples > 0) {
+            set_out_rate(fi.hz);   // match the I2S clock to this stream's rate
             const int32_t g = s_vol_q8;
             int16_t *buf;
             if (fi.channels == 1) {   // up-mix mono -> stereo, with gain
@@ -165,7 +185,10 @@ HalAudioClip *hal_audio_open(const char *rel)
     uint8_t *buf; size_t len;
     if (!hal_fs_slurp(rel, &buf, &len)) { ESP_LOGE(TAG, "no audio: %s", rel); return NULL; }
     HalAudioClip *c = calloc(1, sizeof(*c));
-    c->mp3 = buf; c->mp3_len = len; c->rd_pos = 0; c->hz = OUT_RATE; c->played = 0; c->len_ms = 0;
+    // hz starts at 0 so the decoder fills in the stream's REAL rate on the first
+    // frame; pos_ms then divides played-samples by the true rate (a 22.05kHz file
+    // left at 44100 here would report 2x position and desync the word highlight).
+    c->mp3 = buf; c->mp3_len = len; c->rd_pos = 0; c->hz = 0; c->played = 0; c->len_ms = 0;
     return c;
 }
 
@@ -404,6 +427,7 @@ bool audio_esp32_pcm_pump(void)
     xSemaphoreGive(s_mtx);
 
     if (of > 0) {
+        set_out_rate(OUT_RATE);   // this path upsamples to OUT_RATE stereo
         spk(true);
         size_t wr;
         i2s_channel_write(s_tx, buf, (size_t)of * 4, &wr, pdMS_TO_TICKS(40));

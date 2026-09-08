@@ -27,6 +27,17 @@ static int    s_pack_surah = -1; // surah the loaded pack is for (packs are per-
 static int    s_bm_toast = 0;    // frames remaining on the "Bookmarked" confirmation
 #define s_player g_player   // the reader drives the shared transport
 
+// Vertical scroll for ayat taller than the screen (~43% of ayat at Large).
+// While playing, the view follows the recited word; while paused, Up/Down drive
+// s_manual_scroll. s_scroll is the eased, currently-applied offset (px from the
+// ayah's top); s_scroll_key detects an ayah change so the scroll resets.
+static float  s_scroll = 0.f;
+static int    s_manual_scroll = 0;
+static int    s_scroll_key = -1;
+static bool   s_overflow = false;   // set by on_render, read by on_input
+static int    s_max_scroll = 0;     // set by on_render, read by on_input
+#define SCROLL_STEP 60              // px per Up/Down press while paused
+
 // Height of the opaque transport panel (above the keybar).
 #define FOOT_H 28
 
@@ -99,7 +110,8 @@ static void on_leave(void)
 }
 
 // Tajweed palette — index matches tools/shape_quran.py RULE_COLOR / PREVIEW_PALETTE.
-//   1 red=necessary madd · 2 amber=madd · 3 green=nasal · 4 blue=qalqala · 5 grey=silent
+//   1 red=obligatory madd · 2 amber=madd · 3 green=ghunnah/ikhfa · 4 blue=qalqala
+//   5 grey=silent/merged · 6 dark blue=tafkhim (heavy raa + laam of Allah)
 static const color_t TAJWEED_PAL[] = {
     THEME_TEXT,               // 0 default
     RGB565(255,  90,  90),    // 1 red
@@ -107,6 +119,7 @@ static const color_t TAJWEED_PAL[] = {
     RGB565( 70, 210, 130),    // 3 green
     RGB565( 95, 170, 255),    // 4 blue
     RGB565(120, 120, 135),    // 5 grey
+    RGB565( 70, 120, 235),    // 6 dark blue (tafkhim)
 };
 #define TAJWEED_N ((int)(sizeof(TAJWEED_PAL) / sizeof(TAJWEED_PAL[0])))
 
@@ -160,26 +173,78 @@ static void on_render(Canvas *c)
     // cleanly clipped behind the panel instead.
     int foot_y = CANVAS_HEIGHT - THEME_KEYBAR_H - FOOT_H;   // above the keybar
     {
-        // Center the focused ayah in the reading band (below header, above the
-        // transport panel); clamp the top so tall (large-font / multi-line)
-        // ayat don't ride up under the header.
+        // Reading band: below the header, above the (opaque) transport panel.
         int band_top = 26, band_bot = foot_y - 4;
-        int cur_top = band_top + (band_bot - band_top - cur.h) / 2;
-        if (cur_top < band_top) cur_top = band_top;
-        // Focused ayah: tajweed-colored when enabled; prev/next stay dimmed mono.
-        draw_ayah(c, surah, ayah, cur_top, THEME_TEXT, s_player.active_word, g_prefs.tajweed);
+        int view_h = foot_y - band_top;          // full height the panel leaves us
+        bool overflow = (cur.h > view_h);
 
-        // At large font sizes there's no room for context — show only the focus ayah.
-        if (!prefs_font_is_large()) {
-            AyahGlyphs prev;
-            // Only draw the previous ayah if it fits above without touching the
-            // header (it renders before us, so it would draw on top of it).
-            if (glyphpack_get(&s_pack, surah, ayah - 1, &prev) &&
-                cur_top - prev.h - 14 >= band_top)
-                draw_ayah(c, surah, ayah - 1, cur_top - prev.h - 14, THEME_DIM, -1, false);
-            // The next ayah may run long; the opaque panel below clips it.
-            if (cur_top + cur.h + 14 < band_bot)
-                draw_ayah(c, surah, ayah + 1, cur_top + cur.h + 14, THEME_DIM, -1, false);
+        // Reset the scroll whenever the focused ayah changes.
+        int ayah_key = (surah << 16) | (ayah & 0xffff);
+        if (s_scroll_key != ayah_key) {
+            s_scroll_key = ayah_key; s_scroll = 0.f; s_manual_scroll = 0;
+        }
+        s_overflow = overflow;
+        s_max_scroll = overflow ? (cur.h - view_h) : 0;
+
+        if (!overflow) {
+            // Fits: center in the band, clamped so it can't ride under the header.
+            int cur_top = band_top + (band_bot - band_top - cur.h) / 2;
+            if (cur_top < band_top) cur_top = band_top;
+            // Focused ayah: tajweed-colored when enabled.
+            draw_ayah(c, surah, ayah, cur_top, THEME_TEXT, s_player.active_word, g_prefs.tajweed);
+
+            // At large font sizes there's no room for context — focus ayah only.
+            if (!prefs_font_is_large()) {
+                // Context ayat are also tajweed-colored when enabled (whole-page
+                // Mushaf feel); THEME_DIM is the base tint, so their plain text
+                // stays subdued while tajweed letters still show their rule colour.
+                bool tj = g_prefs.tajweed;
+                AyahGlyphs prev;
+                // Only draw the previous ayah if it fits above without touching the
+                // header (it renders before us, so it would draw on top of it).
+                if (glyphpack_get(&s_pack, surah, ayah - 1, &prev) &&
+                    cur_top - prev.h - 14 >= band_top)
+                    draw_ayah(c, surah, ayah - 1, cur_top - prev.h - 14, THEME_DIM, -1, tj);
+                // The next ayah may run long; the opaque panel below clips it.
+                if (cur_top + cur.h + 14 < band_bot)
+                    draw_ayah(c, surah, ayah + 1, cur_top + cur.h + 14, THEME_DIM, -1, tj);
+            }
+        } else {
+            // Taller than the screen: scroll it. While playing, keep the recited
+            // word ~42% down the view (karaoke follow); while paused, honour the
+            // manual Up/Down scroll. No context ayat in this mode.
+            int target;
+            AtWordBox b;
+            if (s_player.playing) {
+                if (s_player.active_word >= 0 &&
+                    ayah_word_box(&cur, s_player.active_word, &b))
+                    target = (b.y + b.h / 2) - (int)(view_h * 0.42f);
+                else
+                    target = (int)s_scroll;   // hold between words / at ayah end
+            } else {
+                target = s_manual_scroll;
+            }
+            if (target < 0) target = 0;
+            if (target > s_max_scroll) target = s_max_scroll;
+            // Ease toward the target so the follow-scroll glides, not jumps.
+            float d = (float)target - s_scroll; if (d < 0) d = -d;
+            if (d < 0.75f) s_scroll = (float)target;
+            else           s_scroll += ((float)target - s_scroll) * 0.25f;
+
+            int top = band_top - (int)(s_scroll + 0.5f);
+            draw_ayah(c, surah, ayah, top, THEME_TEXT, s_player.active_word, g_prefs.tajweed);
+
+            // The ayah scrolled up into the header band — repaint the header over it
+            // (mirrors how the opaque transport panel masks the bottom overflow).
+            canvas_rect_fill(c, 0, 0, CANVAS_WIDTH, band_top, THEME_BG);
+            theme_header(c, surah_name(surah), THEME_TITLE, ref,
+                         marked ? THEME_BADGE : THEME_LABEL);
+
+            // Slim scrollbar on the right edge: how far through the ayah we are.
+            int thumb_h = view_h * view_h / cur.h; if (thumb_h < 12) thumb_h = 12;
+            int thumb_y = band_top + (int)((view_h - thumb_h) * (s_scroll / s_max_scroll));
+            canvas_rect_fill(c, CANVAS_WIDTH - 3, band_top, 2, view_h, THEME_GRID);
+            canvas_rect_fill(c, CANVAS_WIDTH - 3, thumb_y, 2, thumb_h, THEME_ACCENT);
         }
     }
 
@@ -282,14 +347,25 @@ static void on_input(InputEvent e)
         else player_prev_ayah(&s_player);
         break;
 
-    // D-pad always moves between ayat.
+    // Left/Right always move between ayat. Up/Down scroll a too-tall ayah while
+    // paused (see on_render); otherwise they also move between ayat.
     case INPUT_NAV_RIGHT:
-    case INPUT_NAV_DOWN:
         player_next_ayah(&s_player);
         break;
     case INPUT_NAV_LEFT:
-    case INPUT_NAV_UP:
         player_prev_ayah(&s_player);
+        break;
+    case INPUT_NAV_DOWN:
+        if (!s_player.playing && s_overflow) {
+            s_manual_scroll += SCROLL_STEP;
+            if (s_manual_scroll > s_max_scroll) s_manual_scroll = s_max_scroll;
+        } else player_next_ayah(&s_player);
+        break;
+    case INPUT_NAV_UP:
+        if (!s_player.playing && s_overflow) {
+            s_manual_scroll -= SCROLL_STEP;
+            if (s_manual_scroll < 0) s_manual_scroll = 0;
+        } else player_prev_ayah(&s_player);
         break;
 
     case INPUT_BTN_MODE:
