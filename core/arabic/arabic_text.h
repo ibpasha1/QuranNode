@@ -91,3 +91,44 @@ int arabic_draw_ayah_centered(Canvas *c, int y, const AyahGlyphs *g,
 void arabic_draw_ayah_colored(Canvas *c, int x, int y, const AyahGlyphs *g,
                               const color_t *palette, int n_palette, color_t deflt,
                               int highlight_word, color_t hl_color);
+
+// --- Progressive veil (hifz drill) ----------------------------------------
+// The veil is a POST-PASS, not a draw parameter. Threading a mask through the
+// blit would need a per-pixel "which word owns this?" test, but word boxes
+// overlap and don't tile — that's ~1.3M tests/frame. Instead the caller draws
+// the ayah normally, then paints a curtain over the hidden words' boxes: it's
+// O(n_hidden) rects and works with the plain AND tajweed blit for free, since
+// it never touches the glyph coverage.
+typedef enum {
+    VEIL_NONE = 0,   // hide nothing
+    VEIL_TAIL,       // hide the last pct% of [w0..w1] — keep the opening as the
+                     // retrieval cue, hide the ending that must fire from memory
+    VEIL_KEEP_FIRST, // keep only the first word of [w0..w1], hide the rest
+    VEIL_STRIDE,     // hide every `stride`-th word (a lighter, interleaved veil)
+    VEIL_ALL,        // hide all of [w0..w1]
+} VeilMode;
+
+// Fill `mask` (n_words bytes; 1 = hidden) for the words in [w0..w1] of an ayah.
+// DETERMINISTIC — never random: random hiding makes rep 2 easier than rep 1, is
+// unrepeatable across sessions, and turns "shaky" into noise. Words outside
+// [w0..w1] are never hidden. `pct` applies to VEIL_TAIL, `stride` to VEIL_STRIDE.
+void ayah_veil_mask(uint8_t *mask, int n_words, int w0, int w1,
+                    VeilMode mode, int pct, int stride);
+
+typedef struct {
+    const uint8_t *mask;   // per-word: 1 = hide (n_words entries)
+    int      n_words;
+    bool     outline;      // FADE: leave a box outline (word shape is a legit
+                           // scaffold). RECALL: false — a blank curtain.
+    color_t  curtain;      // fill painted over a hidden word
+    color_t  edge;         // outline color, used only when `outline`
+} AyahVeil;
+
+// Paint the curtain over an already-drawn ayah's hidden words. `pad = 2` to
+// match arabic_draw_ayah's highlight pad, so veil and highlight line up.
+void arabic_veil_ayah(Canvas *c, int x, int y, const AyahGlyphs *g,
+                      const AyahVeil *v);
+
+// Union bounding box of words [w0..w1] (reading order), for framing a segment.
+// Clamps the range to the ayah; returns false if it covers no drawable word.
+bool ayah_word_span_box(const AyahGlyphs *g, int w0, int w1, AtWordBox *out);

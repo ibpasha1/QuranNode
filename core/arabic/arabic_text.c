@@ -2,6 +2,7 @@
 #include "plat.h"
 #include "hal.h"
 #include <string.h>
+#include <limits.h>
 
 static const char *TAG = "ARABIC";
 
@@ -209,4 +210,86 @@ void arabic_draw_ayah_colored(Canvas *c, int x, int y, const AyahGlyphs *g,
         a += g->w;
         ci += g->w;
     }
+}
+
+// --- Progressive veil -----------------------------------------------------
+void ayah_veil_mask(uint8_t *mask, int n_words, int w0, int w1,
+                    VeilMode mode, int pct, int stride)
+{
+    if (!mask || n_words <= 0) return;
+    memset(mask, 0, (size_t)n_words);
+    if (mode == VEIL_NONE) return;
+
+    if (w0 < 0) w0 = 0;
+    if (w1 >= n_words) w1 = n_words - 1;
+    if (w0 > w1) return;
+    int count = w1 - w0 + 1;
+
+    switch (mode) {
+    case VEIL_TAIL: {
+        // Hide the last `pct`% of the span (rounded), keeping the head visible.
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        int hidden = (count * pct + 50) / 100;
+        if (hidden > count) hidden = count;
+        for (int i = w1 - hidden + 1; i <= w1; i++) mask[i] = 1;
+        break;
+    }
+    case VEIL_KEEP_FIRST:
+        for (int i = w0 + 1; i <= w1; i++) mask[i] = 1;
+        break;
+    case VEIL_STRIDE:
+        if (stride < 2) stride = 2;
+        for (int i = w0; i <= w1; i++)
+            if ((i - w0) % stride == stride - 1) mask[i] = 1;
+        break;
+    case VEIL_ALL:
+        for (int i = w0; i <= w1; i++) mask[i] = 1;
+        break;
+    default:
+        break;
+    }
+}
+
+void arabic_veil_ayah(Canvas *c, int x, int y, const AyahGlyphs *g,
+                      const AyahVeil *v)
+{
+    if (!v || !v->mask) return;
+    int n = v->n_words < g->n_words ? v->n_words : g->n_words;
+    const int pad = 2;   // align with arabic_draw_ayah's highlight pad
+    for (int i = 0; i < n; i++) {
+        if (!v->mask[i]) continue;
+        AtWordBox b;
+        if (!ayah_word_box(g, i, &b)) continue;
+        int rx = x + b.x - pad, ry = y + b.y - pad;
+        int rw = b.w + 2 * pad, rh = b.h + 2 * pad;
+        canvas_rect_rounded_fill(c, rx, ry, rw, rh, 3, v->curtain);
+        if (v->outline)   // FADE: leave the word's footprint as a scaffold
+            canvas_rect_rounded(c, rx, ry, rw, rh, 3, v->edge);
+    }
+}
+
+bool ayah_word_span_box(const AyahGlyphs *g, int w0, int w1, AtWordBox *out)
+{
+    if (w0 < 0) w0 = 0;
+    if (w1 >= g->n_words) w1 = g->n_words - 1;
+    if (w0 > w1) return false;
+
+    int x0 = INT_MAX, y0 = INT_MAX, x1 = INT_MIN, y1 = INT_MIN;
+    bool any = false;
+    for (int i = w0; i <= w1; i++) {
+        AtWordBox b;
+        if (!ayah_word_box(g, i, &b)) continue;
+        if (b.x < x0) x0 = b.x;
+        if (b.y < y0) y0 = b.y;
+        if (b.x + b.w > x1) x1 = b.x + b.w;
+        if (b.y + b.h > y1) y1 = b.y + b.h;
+        any = true;
+    }
+    if (!any) return false;
+    out->x = (uint16_t)x0;
+    out->y = (uint16_t)y0;
+    out->w = (uint16_t)(x1 - x0);
+    out->h = (uint16_t)(y1 - y0);
+    return true;
 }
