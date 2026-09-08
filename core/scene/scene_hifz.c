@@ -23,7 +23,17 @@
 // The drill is a separate scene; it takes a portion and grades it on return.
 void scene_hifz_drill_set_portion(int portion);
 
-typedef enum { VIEW = 0, PICK_TARGET, GRADE } Mode;
+typedef enum { VIEW = 0, PICK_TARGET, GRADE, MAP } Mode;
+
+// Memorization heat map: the same 604-cell mushaf grid the khatm screen uses,
+// keyed on strength instead of reading coverage. Geometry mirrors scene_progress.
+#define MAP_COLS  31
+#define MAP_CELL   8
+#define MAP_PITCH  9
+#define MAP_W     (MAP_COLS * MAP_PITCH - 1)
+#define MAP_X     ((CANVAS_WIDTH - MAP_W) / 2)
+#define MAP_Y     40
+#define MAP_WEAK_MAX 8
 
 static Mode s_mode;
 static int  s_sel;          // index into the flattened task list
@@ -48,7 +58,29 @@ typedef struct { int8_t tier; int16_t portion; uint8_t overdue; } Row;
 static Row s_rows[1 + HIFZ_PLAN_MAX * 2];
 static int s_nrows;
 
+// Heat-map cell heights + weak list, rebuilt only when hifz state changes.
+static uint8_t  s_map_h[QDB_PAGE_COUNT];
+static uint32_t s_map_seq = 0;
+static HifzWeakAyah s_weak[MAP_WEAK_MAX];
+static int s_nweak;
+static int s_weak_sel;
+
 static void toast(const char *m) { s_toast_msg = m; s_toast = 90; }
+
+static void rebuild_map(void)
+{
+    uint32_t seq = hifz_state_seq();
+    if (seq == s_map_seq) return;
+    s_map_seq = seq;
+    for (int p = 1; p <= QDB_PAGE_COUNT; p++) {
+        float f = hifz_page_frac(p);
+        int h = (int)(f * MAP_CELL + 0.5f);
+        if (f > 0.f && h == 0) h = 1;
+        s_map_h[p - 1] = (uint8_t)h;
+    }
+    s_nweak = hifz_weak_ayat(s_weak, MAP_WEAK_MAX);
+    if (s_weak_sel >= s_nweak) s_weak_sel = s_nweak > 0 ? s_nweak - 1 : 0;
+}
 
 static void rebuild_rows(void)
 {
@@ -272,6 +304,9 @@ static void render_view(Canvas *c)
     } else if (pl->new_available && pl->n_sabaq == 0) {
         font_draw_string_centered(c, sy, &font_tiny,
                                   "Press NEW to start today's portion", THEME_ACCENT);
+    } else {
+        font_draw_string_centered(c, sy, &font_tiny,
+                                  "Hold OK for your memorization map", THEME_DIM);
     }
 
     if (s_toast > 0 && s_toast_msg) {
@@ -384,13 +419,80 @@ static void render_pick(Canvas *c)
     theme_keybar(c, chips, 3);
 }
 
+// --- memorization heat map + weak spots -----------------------------------
+static void render_map(Canvas *c)
+{
+    theme_header(c, "MEMORIZED", THEME_TITLE, NULL, THEME_DIM);
+    rebuild_map();
+
+    // 604-cell grid, each page filling upward by memorized fraction; a page
+    // holding a lapsed ayah gets a coral cap so weak spots jump out.
+    for (int p = 1; p <= QDB_PAGE_COUNT; p++) {
+        int i = p - 1;
+        int x = MAP_X + (i % MAP_COLS) * MAP_PITCH;
+        int y = MAP_Y + (i / MAP_COLS) * MAP_PITCH;
+        canvas_rect_fill(c, x, y, MAP_CELL, MAP_CELL, THEME_GRID);
+        int h = s_map_h[i];
+        if (h > 0)
+            canvas_rect_fill(c, x, y + MAP_CELL - h, MAP_CELL, h,
+                             h >= MAP_CELL ? THEME_ACTIVE : THEME_BAR);
+        if (hifz_page_has_weak(p))
+            canvas_hline(c, x, y, MAP_CELL, THEME_BADGE);
+    }
+
+    const HifzStats *k = hifz_stats();
+    int gy = MAP_Y + 20 * MAP_PITCH + 6;
+    char s[40];
+    snprintf(s, sizeof s, "%d ayat memorized", k->memorized_ayat);
+    font_draw_string(c, 12, gy, &font_tiny, s, THEME_LABEL);
+    font_draw_string_right(c, CANVAS_WIDTH - 12, gy, &font_tiny,
+                           "coral = review", THEME_BADGE);
+
+    int ly = gy + 14;
+    font_draw_string(c, 12, ly, &font_tiny, "WEAK SPOTS", THEME_LABEL);
+    ly += 12;
+    if (s_nweak == 0) {
+        font_draw_string_centered(c, ly + 24, &font_small,
+            hifz_scope().kind == HZ_SCOPE_NONE ? "Set a target first"
+                                               : "Nothing weak - masha'Allah",
+            THEME_DIM);
+    } else {
+        for (int i = 0; i < s_nweak; i++) {
+            int ry = ly + i * 22;
+            bool sel = (i == s_weak_sel);
+            if (sel) theme_sel_block(c, 10, ry, CANVAS_WIDTH - 20, 20);
+            else {
+                canvas_rect_fill(c, 10, ry, CANVAS_WIDTH - 20, 20, THEME_PANEL);
+                canvas_rect(c, 10, ry, CANVAS_WIDTH - 20, 20, THEME_GRID);
+            }
+            color_t fg = sel ? THEME_SEL_TEXT : THEME_TEXT;
+            char ref[16];
+            snprintf(ref, sizeof ref, "%d:%d", s_weak[i].surah, s_weak[i].ayah);
+            font_draw_string(c, 20, ry + 3, &font_small, ref, fg);
+            font_draw_string_right(c, CANVAS_WIDTH - 20, ry + 5, &font_tiny,
+                                   s_weak[i].lapsed ? "lapsed" : "shaky",
+                                   sel ? THEME_SEL_TEXT
+                                       : (s_weak[i].lapsed ? THEME_BADGE : THEME_DIM));
+        }
+    }
+
+    KeyChip chips[3] = {
+        { "^v", "SPOT", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN,
+                             INPUT_ENC_CW, INPUT_ENC_CCW } },
+        { "OK", "DRILL", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
+        { "BK", "BACK", 1, { INPUT_BTN_BACK } },
+    };
+    theme_keybar(c, chips, 3);
+}
+
 static void on_render(Canvas *c)
 {
     theme_clear(c);
-    rebuild_rows();
+    if (s_mode != MAP) rebuild_rows();
     switch (s_mode) {
     case PICK_TARGET: render_pick(c); break;
     case GRADE:       render_grade(c); break;
+    case MAP:         render_map(c); break;
     default:          render_view(c); break;
     }
 }
@@ -431,6 +533,33 @@ static void pick_adjust(int dir)
 
 static void on_input(InputEvent e)
 {
+    if (s_mode == MAP) {
+        switch (e.type) {
+        case INPUT_NAV_UP:
+        case INPUT_ENC_CCW:  if (s_weak_sel > 0) { s_weak_sel--; hal_audio_click(false); } break;
+        case INPUT_NAV_DOWN:
+        case INPUT_ENC_CW:   if (s_weak_sel < s_nweak - 1) { s_weak_sel++; hal_audio_click(false); } break;
+        case INPUT_NAV_SELECT:
+        case INPUT_ENC_PUSH:
+            // Drill the portion that covers the selected weak ayah.
+            if (s_nweak > 0) {
+                int g = qdb_global_index(s_weak[s_weak_sel].surah, s_weak[s_weak_sel].ayah);
+                int pi = hifz_portion_at(g);
+                if (pi >= 0) {
+                    hal_audio_click(true);
+                    scene_hifz_drill_set_portion(pi);
+                    scene_switch(SCENE_HIFZ_DRILL);
+                } else {
+                    toast("No portion covers that ayah");
+                }
+            }
+            break;
+        case INPUT_BTN_BACK: s_mode = VIEW; break;
+        default: break;
+        }
+        return;
+    }
+
     if (s_mode == GRADE) {
         switch (e.type) {
         case INPUT_NAV_UP:
@@ -510,6 +639,13 @@ static void on_input(InputEvent e)
             s_grade_sel = 0;
             s_mode = GRADE;
         }
+        break;
+    case INPUT_NAV_SELECT_LONG:
+        // Hold OK for the memorization heat map + weak spots.
+        hal_audio_click(true);
+        s_weak_sel = 0;
+        s_map_seq = 0;   // force a rebuild
+        s_mode = MAP;
         break;
     case INPUT_NAV_RIGHT:
         s_pick_row = 0;

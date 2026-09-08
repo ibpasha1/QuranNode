@@ -165,9 +165,21 @@ void               hifz_portion_label(int portion, char *buf, int n);
 
 // --- Per-ayah strength ----------------------------------------------------
 int   hifz_strength(int surah, int ayah);    // 0..7
+bool  hifz_ayah_lapsed(int surah, int ayah); // the lapsed marker (a HZ_NO)
 void  hifz_grade_ayah(int surah, int ayah, HifzGrade g);
 float hifz_surah_frac(int surah);            // memorized fraction of a surah
 float hifz_juz_frac(int juz);
+
+// --- Heat map + weak spots ------------------------------------------------
+// The memorization map reuses the khatm coverage grid, keyed on strength.
+float hifz_page_frac(int page);              // memorized fraction of a mushaf page
+bool  hifz_page_has_weak(int page);          // a lapsed ayah sits on this page
+
+// The weakest memorized ayat, weakest-first (lapsed, then lowest strength), for
+// targeted review. Only ayat that have been learned and slipped — never
+// still-unlearned material. Returns the count written (<= max).
+typedef struct { uint16_t surah, ayah; uint8_t strength, lapsed; } HifzWeakAyah;
+int hifz_weak_ayat(HifzWeakAyah *out, int max);
 
 // --- Plan + stats ---------------------------------------------------------
 const HifzPlan  *hifz_plan(void);

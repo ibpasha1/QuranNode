@@ -265,6 +265,59 @@ float hifz_juz_frac(int juz)
     return frac_range(g0, g1);
 }
 
+bool hifz_ayah_lapsed(int surah, int ayah)
+{
+    int g = qdb_global_index(surah, ayah);
+    return g >= 1 && g <= HIFZ_TOTAL_AYAT && (s_b.strength[g - 1] & 0x80);
+}
+
+float hifz_page_frac(int page)
+{
+    int g0 = qdb_page_first_global(page);
+    int cnt = qdb_page_ayah_count(page);
+    if (g0 <= 0 || cnt <= 0) return 0.f;
+    return frac_range(g0, g0 + cnt - 1);
+}
+
+bool hifz_page_has_weak(int page)
+{
+    int g0 = qdb_page_first_global(page);
+    int cnt = qdb_page_ayah_count(page);
+    if (g0 <= 0 || cnt <= 0) return false;
+    for (int g = g0; g < g0 + cnt && g <= HIFZ_TOTAL_AYAT; g++)
+        if (s_b.strength[g - 1] & 0x80) return true;   // a lapsed ayah
+    return false;
+}
+
+int hifz_weak_ayat(HifzWeakAyah *out, int max)
+{
+    if (!out || max <= 0) return 0;
+    // Keep the `max` weakest as we scan: lapsed outrank shaky, then lower
+    // strength outranks higher. A bounded insertion keeps this O(6236 * max).
+    int n = 0;
+    for (int g = 1; g <= HIFZ_TOTAL_AYAT; g++) {
+        uint8_t st = s_b.strength[g - 1];
+        int s = st & 7;
+        bool lapsed = (st & 0x80) != 0;
+        if (!((s > 0 && s <= 2) || lapsed)) continue;   // learned, then slipped
+        QRef r = qdb_from_global(g);
+        if (!r.surah) continue;
+        HifzWeakAyah cand = { (uint16_t)r.surah, (uint16_t)r.ayah,
+                              (uint8_t)s, (uint8_t)(lapsed ? 1 : 0) };
+        // rank key: lower is weaker. lapsed => big bonus toward the front.
+        int ck = (lapsed ? 0 : 100) + s;
+        int pos = n;
+        while (pos > 0) {
+            int pk = (out[pos - 1].lapsed ? 0 : 100) + out[pos - 1].strength;
+            if (pk <= ck) break;
+            if (pos < max) out[pos] = out[pos - 1];
+            pos--;
+        }
+        if (pos < max) { out[pos] = cand; if (n < max) n++; }
+    }
+    return n;
+}
+
 // -------------------------------------------------------------------------
 // Scope
 // -------------------------------------------------------------------------

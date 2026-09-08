@@ -382,6 +382,27 @@ int main(void)
         CHECK(hifz_surah_frac(114) > 0.f, "surah fraction did not move");
     }
 
+    printf("-- heat map + weak-ayah list (H6) --\n");
+    {
+        fresh(D0, HZ_SCOPE_SURAH, 114, false);
+        int a = hifz_start_new_portion();      // An-Nas 1..6 (one portion)
+        // Learn it, then lapse ayah 1 and leave ayah 2 shaky.
+        hifz_grade(a, HZ_GOT, 0);
+        hifz_grade_ayah(114, 1, HZ_NO);        // lapses ayah 1
+        int page = qdb_page_of(114, 1);
+        CHECK(hifz_page_frac(page) > 0.f, "page fraction did not move");
+        CHECK(hifz_page_has_weak(page), "lapsed ayah not flagged weak on its page");
+        CHECK(hifz_ayah_lapsed(114, 1), "ayah 1 lapse marker missing");
+        CHECK(!hifz_ayah_lapsed(114, 3), "ayah 3 wrongly marked lapsed");
+
+        HifzWeakAyah w[16];
+        int nw = hifz_weak_ayat(w, 16);
+        CHECK(nw >= 1, "no weak ayat surfaced");
+        // The lapsed ayah must rank first (weakest).
+        CHECK(nw >= 1 && w[0].surah == 114 && w[0].ayah == 1 && w[0].lapsed,
+              "lapsed ayah not ranked first in the weak list");
+    }
+
     if (fails == 0) printf("\nhifz-test: all checks passed\n");
     else            printf("\nhifz-test: %d FAILURES\n", fails);
     return fails != 0;

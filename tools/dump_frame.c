@@ -216,6 +216,7 @@ int main(int argc, char **argv)
         case '>': app_input(ev(INPUT_ENC_CW));    break;
         case '<': app_input(ev(INPUT_ENC_CCW));   break;
         case 's': app_input(ev(INPUT_NAV_SELECT));break;
+        case 'L': app_input(ev(INPUT_NAV_SELECT_LONG)); break;
         case 'p': app_input(ev(INPUT_BTN_PLAY));  break;
         case 'b': app_input(ev(INPUT_BTN_BACK));  break;
         case 'm': app_input(ev(INPUT_BTN_MENU));  break;
