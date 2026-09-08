@@ -476,12 +476,57 @@ static int frontier(void)
     return s_b.scope.reverse ? s_b.scope.last_g : s_b.scope.first_g;
 }
 
+// The whole Quran at ~half a page a day is ~1200 portions — more than the 480
+// the blob can hold. Once consolidated, fine granularity stops paying its way:
+// two adjacent, solid, same-tier portions review as one run anyway. So when the
+// table fills, fuse the most-consolidated adjacent contiguous pair to reclaim a
+// slot rather than refusing new material. Returns true if a slot was freed.
+//
+// The fused portion keeps the *conservative* schedule (weaker box, shorter
+// streak, summed lapses, oldest created_day, soonest due) so a merge can only
+// bring a portion back sooner, never let it coast.
+static bool merge_adjacent_portions(void)
+{
+    int bi = -1, bj = -1, best = -1;
+    for (int i = 0; i < s_b.n_portions; i++) {
+        const HifzPortion *pi = &s_b.portions[i];
+        if (!pi->first_g || pi->tier == HZ_SABAQ) continue;   // never fuse new work
+        for (int j = 0; j < s_b.n_portions; j++) {
+            if (j == i) continue;
+            const HifzPortion *pj = &s_b.portions[j];
+            if (!pj->first_g || pj->tier != pi->tier) continue;
+            if (pi->last_g + 1 != pj->first_g) continue;       // i directly before j
+            int minbox = pi->box < pj->box ? pi->box : pj->box;
+            int score = (pi->tier == HZ_MANZIL ? 100 : 0) + minbox;  // prefer solid
+            if (score > best) { best = score; bi = i; bj = j; }
+        }
+    }
+    if (bi < 0) return false;
+
+    HifzPortion *a = &s_b.portions[bi], *b = &s_b.portions[bj];
+    a->last_g = b->last_g;
+    if (b->box < a->box) a->box = b->box;
+    if (b->streak < a->streak) a->streak = b->streak;
+    a->lapses = (uint8_t)(a->lapses + b->lapses < 255 ? a->lapses + b->lapses : 255);
+    if (b->created_day && (!a->created_day || b->created_day < a->created_day))
+        a->created_day = b->created_day;
+    if (b->due_day && (!a->due_day || b->due_day < a->due_day)) a->due_day = b->due_day;
+
+    // Compact the freed slot out; the table stays dense.
+    for (int k = bj; k < s_b.n_portions - 1; k++) s_b.portions[k] = s_b.portions[k + 1];
+    memset(&s_b.portions[s_b.n_portions - 1], 0, sizeof(HifzPortion));
+    s_b.n_portions--;
+    QN_LOGI(TAG, "merged adjacent portions to reclaim a slot (now %u)",
+            (unsigned)s_b.n_portions);
+    return true;
+}
+
 int hifz_start_new_portion(void)
 {
     int f = frontier();
     if (!f) return -1;
-    if (s_b.n_portions >= HIFZ_MAX_PORTIONS) {
-        QN_LOGE(TAG, "portion table full (%d)", HIFZ_MAX_PORTIONS);
+    if (s_b.n_portions >= HIFZ_MAX_PORTIONS && !merge_adjacent_portions()) {
+        QN_LOGE(TAG, "portion table full (%d), nothing mergeable", HIFZ_MAX_PORTIONS);
         return -1;
     }
     if (f < s_b.scope.first_g || f > s_b.scope.last_g) return -1;   // scope done

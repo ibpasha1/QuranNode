@@ -253,6 +253,47 @@ int main(void)
                   "segments %d/%d do not tile", i - 1, i);
     }
 
+    printf("-- portion table full: merge an adjacent pair, don't refuse --\n");
+    {
+        fresh(D0, HZ_SCOPE_QURAN, 0, false);
+        // Fill the table, grading each new portion twice so it settles into
+        // sabqi (sabaq is never fused). Carves are contiguous, so neighbours
+        // are adjacent by construction.
+        for (int i = 0; i < HIFZ_MAX_PORTIONS; i++) {
+            int idx = hifz_start_new_portion();
+            CHECK(idx >= 0, "carve %d failed before cap", i);
+            hifz_grade(idx, HZ_GOT, 0);
+            hifz_grade(idx, HZ_GOT, 0);          // -> sabqi
+        }
+        CHECK(hifz_portion_count() == HIFZ_MAX_PORTIONS, "did not fill to the cap");
+
+        // The next carve must fuse a pair and still succeed (pre-merge it would
+        // return -1). Count stays at the cap: one fused out, one carved in.
+        int idx = hifz_start_new_portion();
+        CHECK(idx >= 0, "cap-full carve refused instead of merging");
+        CHECK(hifz_portion_count() == HIFZ_MAX_PORTIONS,
+              "count %d != cap after merge+carve", hifz_portion_count());
+
+        // Invariant the merge must preserve: no two portions overlap.
+        int overlaps = 0;
+        for (int i = 0; i < hifz_portion_count(); i++) {
+            const HifzPortion *pi = P(i);
+            if (!pi->first_g) continue;
+            for (int j = i + 1; j < hifz_portion_count(); j++) {
+                const HifzPortion *pj = P(j);
+                if (!pj->first_g) continue;
+                if (pi->first_g <= pj->last_g && pj->first_g <= pi->last_g) overlaps++;
+            }
+        }
+        CHECK(overlaps == 0, "%d overlapping portion ranges after merge", overlaps);
+
+        // Some portion now spans more than a single ~40-word carve (the fusion).
+        int fused = 0;
+        for (int i = 0; i < hifz_portion_count(); i++)
+            if (P(i)->first_g && P(i)->last_g - P(i)->first_g >= 6) fused++;
+        CHECK(fused > 0, "no portion shows evidence of a merge");
+    }
+
     printf("-- persistence round-trips --\n");
     fresh(D0, HZ_SCOPE_JUZ, 30, true);
     {
