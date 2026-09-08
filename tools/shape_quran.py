@@ -38,26 +38,37 @@ AL_FATIHA = [
 
 # --- Tajweed rule colors ------------------------------------------------------
 # Rule names come from cpfair/quran-tajweed (riwayat Hafs). We group them into a
-# small, legible palette; the DEVICE palette (core/arabic/arabic_text.c) MUST use
-# the same index->RGB mapping. Index 0 = default (uncolored) text.
-#   1 red    = necessary/obligatory madd (long prolongation)
-#   2 amber  = regular/permissible madd
-#   3 green  = nasalization family (ghunnah / idghaam-ghunnah / ikhfa / iqlab)
-#   4 blue   = qalqalah (echoed letters)
-#   5 grey   = silent / hamzat-wasl / assimilated laam
+# small, legible palette that mirrors the Dar al-Marifah colour Mushaf; the DEVICE
+# palette (scene_reader.c TAJWEED_PAL) MUST use the same index->RGB mapping.
+# Index 0 = default (uncolored) text.
+#   1 red       = obligatory madd (madd laazim 6, madd waajib muttasil)
+#   2 amber     = permissible madd (2/4/6 harakaat, munfasil)
+#   3 green     = ghunnah family — every rule pronounced WITH a nasal ghunnah
+#                 (ghunnah, ikhfa, iqlab, idghaam WITH ghunnah, idghaam shafawi)
+#   4 blue      = qalqalah (echoed letters)
+#   5 grey      = silent / merged, pronounced WITHOUT ghunnah (hamzat-wasl,
+#                 sun-letter laam, silent letters, idghaam without ghunnah)
+#   6 dark blue = tafkhim (heavy raa, and the heavy laam of the name Allah).
+#                 Not in the cpfair dataset — computed from the text below.
+TAFKHIM = 6
 RULE_COLOR = {
     "madd_6": 1, "madd_muttasil": 1,
     "madd_2": 2, "madd_246": 2, "madd_munfasil": 2,
-    "ghunnah": 3, "idghaam_ghunnah": 3, "ikhfa": 3, "ikhfa_shafawi": 3, "iqlab": 3,
-    "idghaam_no_ghunnah": 3, "idghaam_mutajaanisain": 3,
-    "idghaam_mutaqaaribain": 3, "idghaam_shafawi": 3,
+    # green: nasalised rules (ghunnah audible)
+    "ghunnah": 3, "idghaam_ghunnah": 3, "idghaam_shafawi": 3,
+    "ikhfa": 3, "ikhfa_shafawi": 3, "iqlab": 3,
     "qalqalah": 4,
+    # grey: silent / merged with no ghunnah (note: rule names match the JSON
+    # exactly — the *_mutajanisayn / *_mutaqaribayn spellings were wrong before,
+    # so those annotations silently fell through to uncolored).
     "hamzat_wasl": 5, "silent": 5, "lam_shamsiyyah": 5,
+    "idghaam_no_ghunnah": 5, "idghaam_mutajanisayn": 5, "idghaam_mutaqaribayn": 5,
 }
 # Preview-only RGB (device has the matching palette). Keep in sync with the device.
 PREVIEW_PALETTE = {
     0: (210, 218, 230), 1: (255, 90, 90), 2: (255, 170, 70),
     3: (70, 210, 130), 4: (95, 170, 255), 5: (120, 120, 135),
+    6: (70, 120, 235),
 }
 
 TAJWEED_DIR = os.path.join(os.path.dirname(__file__), "quran-tajweed")
@@ -79,8 +90,105 @@ def load_tanzil_surah(surah):
     return out
 
 
+# ---- Tafkhim (heavy pronunciation) --------------------------------------
+# The cpfair dataset has no tafkhim rule, so we derive the two cases the colour
+# Mushaf marks in dark blue directly from the Uthmani text: the laam of the name
+# Allah when it is heavy, and heavy raa (per the classical raa rules). Genuinely
+# ambiguous / jawaaz raa cases are left uncolored rather than risk a wrong colour.
+_FATHA  = {0x064E, 0x064B}          # fatha, fathatan
+_DAMMA  = {0x064F, 0x064C}          # damma, dammatan
+_KASRA  = {0x0650, 0x064D}          # kasra, kasratan
+_SUKOON = 0x0652
+_SHADDA = 0x0651
+_DAGGER = 0x0670                    # superscript alef (a long -aa-, fatha-based)
+_RA, _LAM, _HEH = 0x0631, 0x0644, 0x0647
+_ALEF, _ALEF_WASLA, _YEH = 0x0627, 0x0671, 0x064A
+_ISTILA = set("خصضغطقظ")            # huroof al-isti'la (inherently heavy letters)
+
+
+def _is_mark(ch):
+    o = ord(ch)
+    return (0x064B <= o <= 0x065F) or o == _DAGGER or (0x06D6 <= o <= 0x06ED) \
+        or (0x0610 <= o <= 0x061A) or o == 0x0640
+
+
+def _marks_after(text, i):
+    """(set of combining-mark codepoints on base char i, index just past cluster)."""
+    s, j = set(), i + 1
+    while j < len(text) and _is_mark(text[j]):
+        s.add(ord(text[j])); j += 1
+    return s, j
+
+
+def _space_between(text, i, j):
+    return " " in text[i + 1:j]
+
+
+def _jalalah_is_heavy(text, bases, k):
+    """Heavy unless the last real vowel before the shadda'd laam is a kasra."""
+    j = k - 1
+    while j >= 0:
+        b = bases[j]; c = ord(text[b]); mk, _ = _marks_after(text, b)
+        if c in (_ALEF, _ALEF_WASLA):        # connecting alef, no vowel of its own
+            j -= 1; continue
+        if c == _LAM and not (mk & (_FATHA | _DAMMA | _KASRA)):
+            j -= 1; continue                 # silent article laam
+        if mk & _KASRA:  return False
+        if mk & (_FATHA | _DAMMA):  return True
+        j -= 1                               # saakin letter: keep looking back
+    return True                              # utterance start -> heavy
+
+
+def _ra_is_heavy(text, bases, k, i, marks):
+    if marks & (_FATHA | _DAMMA) or _DAGGER in marks:  return True   # raa + fatha/damma
+    if marks & _KASRA:  return False                                 # raa + kasra
+    # Saakin raa: explicit sukoon, or a bare final letter (pausal form).
+    is_final = (k + 1 >= len(bases)) or _space_between(text, i, bases[k + 1])
+    if not (_SUKOON in marks or (is_final and not marks)):
+        return False                         # unclear medial state -> leave default
+    if k == 0:  return True
+    pb = bases[k - 1]; pc = ord(text[pb]); pm, _ = _marks_after(text, pb)
+    if pc == _ALEF_WASLA:  return True        # kasra 'aaridah (connecting hamza)
+    if pc == _YEH and not (pm & (_FATHA | _DAMMA | _KASRA)):  return False  # yaa saakina
+    if pm & (_FATHA | _DAMMA):  return True
+    if pm & _KASRA:
+        # kasra before saakin raa: heavy only if a non-kasra isti'la follows in-word
+        if k + 1 < len(bases):
+            nb = bases[k + 1]
+            if not _space_between(text, i, nb) and text[nb] in _ISTILA:
+                nm, _ = _marks_after(text, nb)
+                if not (nm & _KASRA):  return True
+        return False
+    if k >= 2:                                # preceding letter saakin -> look further
+        ppm, _ = _marks_after(text, bases[k - 2])
+        return bool(ppm & (_FATHA | _DAMMA))
+    return True
+
+
+def tafkhim_indices(text):
+    """{codepoint index -> TAFKHIM} for heavy raa and the heavy laam of Allah."""
+    out = {}
+    bases = [i for i, ch in enumerate(text) if ch != " " and not _is_mark(ch)]
+    for k, i in enumerate(bases):
+        ch = ord(text[i])
+        marks, nxt = _marks_after(text, i)
+        if ch == _RA:
+            if _ra_is_heavy(text, bases, k, i, marks):
+                for m in range(i, nxt):       # the raa + its own marks
+                    out[m] = TAFKHIM
+        elif ch == _LAM and _SHADDA in marks and k >= 1 and k + 1 < len(bases) \
+                and ord(text[bases[k - 1]]) == _LAM \
+                and ord(text[bases[k + 1]]) == _HEH:
+            # doubled laam + heh == the name Allah (not e.g. "lahu", one laam).
+            if _jalalah_is_heavy(text, bases, k):
+                for m in range(bases[k - 1], nxt):   # the "لله" ligature + shadda
+                    out[m] = TAFKHIM
+    return out
+
+
 def load_color_maps(surah, ayah_texts):
-    """Return {ayah: [palette_index per codepoint]} from the tajweed JSON."""
+    """Return {ayah: [palette_index per codepoint]} from the tajweed JSON,
+    overlaid with computed tafkhim colours where the JSON leaves text uncolored."""
     import json
     path = os.path.join(TAJWEED_DIR, "output", "tajweed.hafs.uthmani-pause-sajdah.json")
     data = json.load(open(path))
@@ -89,7 +197,8 @@ def load_color_maps(surah, ayah_texts):
         if e["surah"] != surah:
             continue
         ayah = e["ayah"]
-        n = len(ayah_texts.get(ayah, ""))
+        text = ayah_texts.get(ayah, "")
+        n = len(text)
         arr = [0] * n
         for ann in e["annotations"]:
             idx = RULE_COLOR.get(ann["rule"], 0)
@@ -97,6 +206,9 @@ def load_color_maps(surah, ayah_texts):
                 continue
             for cp in range(ann["start"], min(ann["end"], n)):
                 arr[cp] = idx
+        for cp, v in tafkhim_indices(text).items():
+            if cp < n and arr[cp] == 0:       # never override an existing rule colour
+                arr[cp] = v
         maps[ayah] = arr
     return maps
 
