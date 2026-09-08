@@ -12,6 +12,7 @@
 #include "scene.h"
 #include "arabic_text.h"
 #include "recite.h"
+#include "voice_activity.h"
 #include "timing.h"
 #include "progress.h"
 #include "prefs.h"
@@ -104,27 +105,12 @@ static int  s_sel_word;         // selected word in review (reading order)
 static uint32_t s_seg_stop_ms;  // stop teacher playback at this clip pos (0=off)
 static float s_level;           // live mic level 0..1 (recite view meter)
 
-// Voice-activity endpointing: the recording auto-starts (right after LISTEN)
-// and auto-finishes, so the user just recites and pauses — no button needed.
-// The analyzed audio is trimmed to [s_voice_a, s_voice_b): without the trim,
-// the silent lead-in (while the user draws breath) aligns to the first word
-// and scores it "not heard" — the V1 field bug.
-#define VOICE_PEAK      700       // s16 peak that counts as voice (~0.021 fs)
-                                  // low on purpose: quiet mics/AGC — the
-                                  // scorer has its own noise-relative floor
-// Generous preroll: mic auto-gain ramps up over the first ~second, so the
-// first word may sit below VOICE_PEAK — keep plenty of lead-in so it stays
-// in the analyzed take (the scorer tolerates leading silence; a trimmed-off
-// first word can only score "not heard").
-#define VOICE_PREROLL   (MIC_HZ * 3 / 2)      // keep 1.5s before first voice
-#define VOICE_TAILPAD   (MIC_HZ / 2)          // keep 500ms after last voice
-#define AUTO_STOP_MS    2200      // this much silence after voice = done
-                                  // (learners pause mid-ayah; don't cut them)
-#define NO_VOICE_MS     12000     // never heard anything = give up
-static bool     s_heard;          // any voice yet this take
-static uint32_t s_voice_a, s_voice_b;   // first/last voiced sample bounds
-static uint32_t s_sil_ms;         // silence since the last voiced chunk
-static uint32_t s_wait_ms;        // total time waiting with no voice at all
+// Voice-activity endpointing lives in core/audio/voice_activity.{c,h} now (the
+// drill shares it, and vad-test pins the field-tuned constants). The recording
+// auto-starts (right after LISTEN) and auto-finishes on a pause; the analysed
+// span is trimmed to skip the silent lead-in that would otherwise align to the
+// first word and score it "not heard".
+static VoiceActivity s_va;
 static uint32_t s_rec_off_ms;     // trim offset (maps analysis times -> s_rec)
 static const char *s_ready_hint;  // one-shot status line on the READY view
 
@@ -195,43 +181,16 @@ static void start_listen(void)
     s_state = TEA_LISTEN;
 }
 
-// The INMP441 emits a DC-settle transient right after the I2S channel starts
-// — loud enough to trip VOICE_PEAK at t=0 (every device take logged
-// voiced=[0..]). Discard the first stretch of samples so the endpointer and
-// word 1's alignment see real audio, not the thump.
-#define MIC_WARMUP_MS 250
-static uint32_t s_warmup_left;   // samples still to discard
-
 static void start_recite(void)
 {
     hal_audio_pause(s_clip);
     if (!hal_mic_start(MIC_HZ)) { s_state = TEA_NO_MIC; return; }
     s_rec_n = 0;
     s_level = 0;
-    s_heard = false;
-    s_voice_a = s_voice_b = 0;
-    s_sil_ms = s_wait_ms = 0;
-    s_warmup_left = MIC_HZ * MIC_WARMUP_MS / 1000;
+    va_init(&s_va, MIC_HZ);
     s_ready_hint = NULL;
     hal_audio_click(true);   // audible "your turn" cue
     s_state = TEA_RECITE;
-}
-
-// 44-byte canonical WAV header for 16k mono s16 PCM of `bytes` length.
-static void wav_header(uint8_t *d, uint32_t bytes)
-{
-    memcpy(d, "RIFF", 4);
-    uint32_t v = 36 + bytes;           memcpy(d + 4, &v, 4);
-    memcpy(d + 8, "WAVEfmt ", 8);
-    v = 16;                            memcpy(d + 16, &v, 4);
-    uint16_t h = 1;                    memcpy(d + 20, &h, 2);   // PCM
-    h = 1;                             memcpy(d + 22, &h, 2);   // mono
-    v = MIC_HZ;                        memcpy(d + 24, &v, 4);
-    v = MIC_HZ * 2;                    memcpy(d + 28, &v, 4);
-    h = 2;                             memcpy(d + 32, &h, 2);
-    h = 16;                            memcpy(d + 34, &h, 2);
-    memcpy(d + 36, "data", 4);
-    memcpy(d + 40, &bytes, 4);
 }
 
 // Save the whole (untrimmed) take as a 16k mono WAV named by take + label —
@@ -246,7 +205,7 @@ static void train_save_take(void)
     uint32_t bytes = s_rec_n * sizeof(int16_t);
     uint8_t *raw = (uint8_t *)s_rec;
     memmove(raw + 44, raw, bytes);
-    wav_header(raw, bytes);
+    va_wav_header(raw, bytes, MIC_HZ);
     // Keep a RAM copy regardless of the SD outcome — downloadable over
     // Wi-Fi (LEFT on the training screen), and re-registered live if
     // sharing is already on.
@@ -307,7 +266,7 @@ static void share_takes(void)
 static void finish_recite(void)
 {
     hal_mic_stop();
-    if (!s_heard) {          // nothing captured — back to the prompt
+    if (!s_va.heard) {       // nothing captured — back to the prompt
         s_ready_hint = "Didn't hear you - try again";
         s_state = (s_train >= 0) ? TEA_TRAIN : TEA_READY;
         return;
@@ -331,9 +290,8 @@ static void run_analysis(void)
 
     // Analyze only the voiced span (plus a little tail) — leading silence
     // otherwise aligns to the first words and marks them "not heard".
-    uint32_t a = s_voice_a, b = s_voice_b + VOICE_TAILPAD;
-    if (b > s_rec_n) b = s_rec_n;
-    if (a >= b) { a = 0; b = s_rec_n; }
+    uint32_t a, b;
+    va_span(&s_va, s_rec_n, &a, &b);
     s_rec_off_ms = a * 1000u / MIC_HZ;
 
     // Coverage gate: a grunt (a syllable or two) can't be graded word-by-
@@ -342,7 +300,7 @@ static void run_analysis(void)
     // be 1.2s of voice), so any ratio-based gate rejects honest takes; the
     // tempo-normalized aligner handles pace, and real grunts are <0.9s.
     {
-        uint32_t voiced_ms = (s_voice_b - s_voice_a) / (MIC_HZ / 1000);
+        uint32_t voiced_ms = (s_va.voice_b - s_va.voice_a) / (MIC_HZ / 1000);
         if (voiced_ms < 900) {
             QN_LOGI("TEACHER", "too short: voiced=%ums — not grading", voiced_ms);
             s_ready_hint = "Too short - recite the whole ayah";
@@ -369,7 +327,7 @@ static void run_analysis(void)
         uint32_t pcm_bytes = (b - a) * sizeof(int16_t);
         uint8_t *wav = malloc(44 + pcm_bytes);
         if (wav) {
-            wav_header(wav, pcm_bytes);
+            va_wav_header(wav, pcm_bytes, MIC_HZ);
             memcpy(wav + 44, s_rec + a, pcm_bytes);
             RemoteWord rw[MAX_WORDS];
             int rn = hal_score_remote(wav, 44 + pcm_bytes, s_surah, s_ayah,
@@ -392,7 +350,7 @@ static void run_analysis(void)
     QN_LOGI("TEACHER", "analyze %d:%d ok=%d ref=%ums@%u take=%ums (rec=%ums voiced=[%u..%u]ms)",
             s_surah, s_ayah, ok, s_ref_hz ? s_ref_n / (s_ref_hz / 1000) : 0, s_ref_hz,
             (b - a) / (MIC_HZ / 1000), s_rec_n / (MIC_HZ / 1000),
-            s_voice_a / (MIC_HZ / 1000), s_voice_b / (MIC_HZ / 1000));
+            s_va.voice_a / (MIC_HZ / 1000), s_va.voice_b / (MIC_HZ / 1000));
     for (int i = 0; i < s_nwords; i++)
         QN_LOGI("TEACHER", "  word %d: verdict=%d score=%.2f user=[%u..%u]ms",
                 i, s_words[i].verdict, s_words[i].score,
@@ -450,48 +408,15 @@ static void on_tick(uint32_t dt_ms)
         break;
     case TEA_RECITE: {
         int got = hal_mic_read(s_rec + s_rec_n, (int)(REC_MAX_N - s_rec_n));
-        if (got > 0 && s_warmup_left > 0) {   // drop the mic-start transient
-            uint32_t drop = (uint32_t)got < s_warmup_left ? (uint32_t)got
-                                                          : s_warmup_left;
-            s_warmup_left -= drop;
-            if ((uint32_t)got > drop)
-                memmove(s_rec + s_rec_n, s_rec + s_rec_n + drop,
-                        ((uint32_t)got - drop) * sizeof(int16_t));
-            got -= (int)drop;
-        }
+        // The shared endpointer applies the warmup drop, tracks the voiced
+        // span, and decides when the take is done. Fluid flow: recited then
+        // paused -> analyze; never spoke -> give up back to the prompt.
+        VaResult r = va_feed(&s_va, s_rec, REC_MAX_N, &s_rec_n, got);
         if (got > 0) {
-            // Peak of this chunk: drives the meter and the voice endpointer.
-            int peak = 0;
-            for (int i = 0; i < got; i++) {
-                int v = s_rec[s_rec_n + i];
-                if (v < 0) v = -v;
-                if (v > peak) peak = v;
-            }
-            float lv = (float)peak / 32768.f;
+            float lv = s_va.peak;
             s_level = lv > s_level ? lv : s_level * 0.85f;
-
-            uint32_t chunk_ms = (uint32_t)got * 1000u / MIC_HZ;
-            if (peak >= VOICE_PEAK) {
-                if (!s_heard) {
-                    s_heard = true;
-                    s_voice_a = s_rec_n > VOICE_PREROLL ? s_rec_n - VOICE_PREROLL : 0;
-                }
-                s_voice_b = s_rec_n + (uint32_t)got;
-                s_sil_ms = 0;
-            } else if (s_heard) {
-                s_sil_ms += chunk_ms;
-            } else {
-                s_wait_ms += chunk_ms;
-            }
-
-            s_rec_n += (uint32_t)got;
-            // Fluid flow: recited then paused -> analyze automatically;
-            // never spoke at all -> give up back to the prompt.
-            if ((s_heard && s_sil_ms >= AUTO_STOP_MS) ||
-                (!s_heard && s_wait_ms >= NO_VOICE_MS) ||
-                s_rec_n >= REC_MAX_N)
-                finish_recite();
         }
+        if (r != VA_RUNNING) finish_recite();
         break;
     }
     case TEA_ANALYZE:
@@ -619,18 +544,18 @@ static void on_render(Canvas *c)
             train_label(s_train, &label, tag, sizeof(tag));
             char t[40];
             snprintf(t, sizeof(t), "TAKE %d/%d - %s", s_train + 1, TRAIN_TOTAL,
-                     s_heard ? "hearing you" : "go");
+                     s_va.heard ? "hearing you" : "go");
             font_draw_string_centered(c, iy, &font_small, t,
-                                      s_heard ? THEME_ACTIVE : THEME_BADGE);
+                                      s_va.heard ? THEME_ACTIVE : THEME_BADGE);
             font_draw_string_centered(c, iy + 20, &font_tiny, label, THEME_TEXT);
         } else {
             // The endpointer drives the flow: recite, pause, it analyzes.
             font_draw_string_centered(c, iy, &font_medium,
-                                      s_heard ? "HEARING YOU" : "RECITE",
-                                      s_heard ? THEME_ACTIVE : THEME_BADGE);
+                                      s_va.heard ? "HEARING YOU" : "RECITE",
+                                      s_va.heard ? THEME_ACTIVE : THEME_BADGE);
             font_draw_string_centered(c, iy + 26, &font_tiny,
-                                      s_heard ? "pause when you finish - I'll notice"
-                                              : "go ahead - I'm listening",
+                                      s_va.heard ? "pause when you finish - I'll notice"
+                                                 : "go ahead - I'm listening",
                                       THEME_DIM);
         }
         // Live mic meter.
