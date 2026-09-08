@@ -24,8 +24,10 @@
 #include "nvs_flash.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -37,17 +39,82 @@ void audio_esp32_init(void);
 
 uint32_t plat_millis(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
-// Wall clock: valid once SNTP (or a future RTC) has set system time; an unset
-// clock reads as ~1970 which we report as "unknown" so the UI can say so.
-// TODO(wifi): start SNTP after the OTA Wi-Fi bring-up so this becomes real.
+// -------------------------------------------------------------------------
+// Wall clock. There is no RTC on this board, so system time starts at 1970 on
+// every boot. Two things fix that: SNTP during the OTA Wi-Fi window (see
+// ota_esp32.c), and a last-known epoch persisted to the SD card so an offline
+// boot still lands in roughly the right day. Anything before ~Sept 2020 is
+// reported as 0 = "unknown" so the UI can say so rather than lie.
+// -------------------------------------------------------------------------
+#define CLOCK_VALID_AFTER 1600000000   // ~2020-09-13; below this the clock is unset
+#define CLOCK_MAGIC       0x314B4C43u  // "CLK1"
+
+typedef struct { uint32_t magic; int64_t epoch; uint32_t check; } ClockBlob;
+
+static QnClockSource s_clock_src = QN_CLOCK_UNKNOWN;
+
 int64_t hal_wall_clock(void)
 {
     time_t t = time(NULL);
-    return t > 1600000000 ? (int64_t)t : 0;
+    return t > CLOCK_VALID_AFTER ? (int64_t)t : 0;
 }
 
-// TODO: expose in Settings; US Eastern (EDT) default for now.
-int hal_tz_offset_min(void) { return -240; }
+QnClockSource hal_clock_source(void) { return s_clock_src; }
+
+void hal_clock_persist(void)
+{
+    time_t t = time(NULL);
+    if (t <= CLOCK_VALID_AFTER) return;          // nothing worth saving yet
+    if (s_clock_src == QN_CLOCK_UNKNOWN) s_clock_src = QN_CLOCK_SYNCED;
+    ClockBlob b = { CLOCK_MAGIC, (int64_t)t, 0 };
+    b.check = (uint32_t)(b.epoch ^ CLOCK_MAGIC);
+    hal_state_save("clock", &b, sizeof b);
+}
+
+// Restore the last known epoch at boot. Only ever steps the clock FORWARD, so
+// a stale save can't drag a fresh SNTP sync backwards. Call after the SD mount.
+void hal_clock_restore(void)
+{
+    ClockBlob b;
+    size_t got = 0;
+    if (!hal_state_load("clock", &b, sizeof b, &got) || got != sizeof b) return;
+    if (b.magic != CLOCK_MAGIC) return;
+    if (b.check != (uint32_t)(b.epoch ^ CLOCK_MAGIC)) return;
+    if (b.epoch <= CLOCK_VALID_AFTER) return;
+    if (time(NULL) >= (time_t)b.epoch) return;   // already at or ahead of it
+    struct timeval tv = { .tv_sec = (time_t)b.epoch, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+    s_clock_src = QN_CLOCK_RESTORED;
+    ESP_LOGI(TAG, "clock restored to %lld (approximate; awaiting SNTP)",
+             (long long)b.epoch);
+}
+
+// Marks the clock as authoritative — called by ota_esp32.c once SNTP lands.
+void hal_clock_mark_synced(void) { s_clock_src = QN_CLOCK_SYNCED; }
+
+// Local offset from a POSIX TZ rule, so DST is handled instead of the old
+// hardcoded -240 (which was silently an hour wrong for ~4 months a year).
+// Override for another zone with -DQN_TZ="..." in platformio.ini build_flags.
+#ifndef QN_TZ
+#define QN_TZ "EST5EDT,M3.2.0,M11.1.0"   // US Eastern
+#endif
+
+// Offset by differencing local and UTC rather than reading tm_gmtoff, which
+// IDF's newlib does not provide. Same method as hal_sim.c, so both HALs agree.
+int hal_tz_offset_min(void)
+{
+    time_t t = time(NULL);
+    if (t <= CLOCK_VALID_AFTER) return -300;   // clock unset: assume standard time
+    struct tm lt, gt;
+    localtime_r(&t, &lt);
+    gmtime_r(&t, &gt);
+    int d = (lt.tm_hour - gt.tm_hour) * 60 + (lt.tm_min - gt.tm_min);
+    // Correct for the pair straddling midnight (yday differs by ±1 or wraps).
+    int dd = lt.tm_yday - gt.tm_yday;
+    if (dd == 1 || dd < -1) d += 1440;
+    else if (dd == -1 || dd > 1) d -= 1440;
+    return d;
+}
 
 // -------------------------------------------------------------------------
 // 5-way navigation switch (active-low GPIOs, internal pull-ups, COM->GND). This
@@ -248,6 +315,13 @@ bool qn_hal_init(void)
                  hal_fs_exists("audio/abdulbasit/78/1.mp3") ? "FOUND" : "MISSING");
     }
 
+    // Local time rules, then the last epoch we saw. Must follow the SD mount:
+    // the saved clock lives under /sdcard/state. SNTP will step it forward
+    // during the OTA Wi-Fi window if the network is reachable.
+    setenv("TZ", QN_TZ, 1);
+    tzset();
+    hal_clock_restore();
+
     if (display_mgr_init() != ESP_OK) {
         ESP_LOGE(TAG, "display init failed");
         return false;
@@ -269,6 +343,17 @@ bool hal_running(void) { return true; }
 void hal_display_push(const uint16_t *fb)
 {
     display_mgr_push_frame((const uint8_t *)fb);
+
+    // Piggyback the clock save on the frame loop: this runs on the main task,
+    // which is allowed to block on FAT. (Doing it from an esp_timer callback
+    // would blow that task's small stack.) Ten minutes is far below the cost
+    // of losing the date, and far above anything that would wear the card.
+    static uint32_t last_clock_save = 0;
+    uint32_t now = plat_millis();
+    if (now - last_clock_save > 600000) {
+        last_clock_save = now;
+        hal_clock_persist();
+    }
 }
 
 void hal_set_brightness(uint8_t percent)

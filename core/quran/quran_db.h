@@ -13,9 +13,29 @@ typedef struct {
 
 #define QDB_SURAH_COUNT 114
 #define QDB_JUZ_COUNT   30
+#define QDB_PAGE_COUNT  604
+#define QDB_AYAH_TOTAL  6236
 
 const SurahInfo *qdb_surah(int surah);   // 1-based; NULL if out of range
 const char *qdb_surah_name(int surah);   // English name, "" if invalid
 int  qdb_ayah_count(int surah);
 QRef qdb_juz_start(int juz);             // 1-based
 int  qdb_juz_of(int surah, int ayah);    // which juz a ref falls in (1..30)
+
+// --- Flat mushaf ordinal --------------------------------------------------
+// Every ayah has a global index 1..6236 in mushaf order. It is the natural key
+// for anything that needs one bit or one slot per ayah (see khatm coverage).
+int  qdb_global_index(int surah, int ayah);   // 0 if the ref is invalid
+QRef qdb_from_global(int gidx);               // {0,0} if out of range
+
+// --- Madani mushaf pages --------------------------------------------------
+// An ayah belongs to exactly ONE page (the QPC attribution) even when its text
+// visually spans a page break. So per-page ayah counts sum to 6236 and per-page
+// read fractions sum to exactly 604 — the invariant the page math relies on.
+int  qdb_page_of(int surah, int ayah);        // 1..604, 0 if invalid
+int  qdb_page_of_global(int gidx);            // 1..604, 0 if invalid
+int  qdb_page_first_global(int page);         // first global ayah on the page
+int  qdb_page_ayah_count(int page);           // ayat attributed to the page
+QRef qdb_page_start(int page);                // first ayah on the page
+QRef qdb_page_end(int page);                  // last ayah attributed to it
+int  qdb_juz_page(int juz);                   // page a juz starts on

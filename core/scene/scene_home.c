@@ -8,6 +8,7 @@
 #include "scene.h"
 #include "player.h"
 #include "progress.h"
+#include "khatm.h"
 #include "quran_db.h"
 #include "prayer.h"
 #include "prefs.h"
@@ -25,6 +26,7 @@ typedef struct {
 
 static const HomeItem ITEMS[] = {
     { "Quran",         ICON_BOOK,   SCENE_NAV },
+    { "Progress",      ICON_INFO,   SCENE_PROGRESS },
     { "Lessons",       ICON_NOTE,   SCENE_COUNT },
     { "Quran Teacher", ICON_WAVE,   SCENE_TEACHER },
     { "Practice",      ICON_REPEAT, SCENE_LOOP },
@@ -98,21 +100,33 @@ static void on_render(Canvas *c)
 
     font_draw_string(c, hx + 12, hy + 10, &font_tiny, "CONTINUE READING",
                      THEME_LABEL);
+    // The badge is the whole-Quran figure, not the juz: how far through the
+    // mushaf you are is the number worth carrying on the home screen.
+    const KhatmStats *k = khatm_stats();
     char badge[12];
-    snprintf(badge, sizeof(badge), "JUZ %d", juz);
+    snprintf(badge, sizeof(badge), "%d%%", (int)(k->percent + 0.5f));
     font_draw_string_right(c, hx + hw - 12, hy + 10, &font_tiny, badge,
                            THEME_TITLE);
 
-    font_draw_string_centered(c, hy + 28, &font_medium, qdb_surah_name(r.surah),
+    font_draw_string_centered(c, hy + 26, &font_medium, qdb_surah_name(r.surah),
                               THEME_TEXT);
-    char sub[40];
-    snprintf(sub, sizeof(sub), "Ayah %d of %d   ·   %.2fx", r.ayah, ayat,
-             r.rate > 0 ? r.rate : 1.0f);
-    font_draw_string_centered(c, hy + 58, &font_tiny, sub, THEME_DIM);
+    char sub[44];
+    snprintf(sub, sizeof(sub), "Ayah %d of %d   ·   Juz %d   ·   p%d",
+             r.ayah, ayat, juz, qdb_page_of(r.surah, r.ayah));
+    font_draw_string_centered(c, hy + 52, &font_tiny, sub, THEME_DIM);
 
-    float frac = ayat > 1 ? (float)(r.ayah - 1) / (float)(ayat - 1) : 0.f;
-    canvas_progress_bar(c, hx + 14, hy + 78, hw - 28, 5, frac,
+    // Progress through the KHATM, not through the current surah — the bar now
+    // means the same thing as the badge above it.
+    canvas_progress_bar(c, hx + 14, hy + 66, hw - 28, 5, k->percent / 100.f,
                         THEME_ACCENT, THEME_GRID);
+
+    char foot[44];
+    if (k->have_day && k->streak > 0)
+        snprintf(foot, sizeof(foot), "%.0f of 604 pages   ·   %d %s streak",
+                 (double)k->pages, k->streak, k->streak == 1 ? "day" : "days");
+    else
+        snprintf(foot, sizeof(foot), "%.0f of 604 pages", (double)k->pages);
+    font_draw_string_centered(c, hy + 78, &font_tiny, foot, THEME_LABEL);
 
     // --- Next prayer strip ---------------------------------------------------
     const int py = 132, ph = 22;
@@ -148,7 +162,9 @@ static void on_render(Canvas *c)
     }
 
     // --- App list ------------------------------------------------------------
-    const int ly = 168, row_h = 38, gap = 5;
+    // 7 rows at the old 38+5 pitch ran to y=464, exactly under the keybar (and
+    // the toast at 442 landed inside the last row). 34+4 fits them in 168..430.
+    const int ly = 168, row_h = 34, gap = 4;
     for (int i = 0; i < N_ITEMS; i++) {
         int y = ly + i * (row_h + gap);
         bool sel = (s_sel == i + 1);
@@ -229,6 +245,11 @@ static void on_input(InputEvent e)
     case INPUT_ENC_CW:    move(+1); break;
     case INPUT_NAV_SELECT:
     case INPUT_ENC_PUSH:  activate(); break;
+    // Long-press the hero for the khatm screen — one press from boot.
+    case INPUT_NAV_SELECT_LONG:
+    case INPUT_ENC_PUSH_LONG:
+        if (s_sel == 0) scene_switch(SCENE_PROGRESS);
+        break;
     case INPUT_BTN_PLAY:  resume_into_reader(); break;
     case INPUT_NAV_RIGHT:
     case INPUT_BTN_MENU:  scene_switch(SCENE_NAV); break;

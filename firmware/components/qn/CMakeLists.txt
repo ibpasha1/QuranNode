@@ -34,6 +34,7 @@ idf_component_register(
         driver fatfs sdmmc vfs esp_timer nvs_flash esp_psram
         esp_wifi esp_event esp_netif esp_http_server app_update
         esp_http_client esp_https_ota esp-tls mbedtls
+        lwip   # esp_sntp.h — clock sync during the OTA Wi-Fi window
 )
 
 # The portable core + reused DSP-Mini drivers are warning-clean in logic but trip

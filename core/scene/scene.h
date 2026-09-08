@@ -17,6 +17,7 @@ typedef enum {
     SCENE_LIBRARY,    // local audio player (nasheeds / lectures / audiobooks)
     SCENE_SETTINGS,   // preferences
     SCENE_TEACHER,    // listen -> recite -> analyze -> review practice loop
+    SCENE_PROGRESS,   // khatm: coverage map, daily pace, what to read today
     SCENE_COUNT,
 } SceneID;
 

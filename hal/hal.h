@@ -87,6 +87,19 @@ void   hal_audio_set_output(int speaker);             // 1 = speaker (amp on whe
 int64_t hal_wall_clock(void);
 int     hal_tz_offset_min(void);
 
+// How much to trust hal_wall_clock(). The device has no RTC, so between boots
+// it can only restore the last epoch it saw and carry it forward on the
+// monotonic timer — good enough to bucket reading by day, but not to the
+// minute. Callers that show a wall time (or gate daily goals) check this.
+typedef enum {
+    QN_CLOCK_UNKNOWN = 0,   // never synced: hal_wall_clock() returns 0
+    QN_CLOCK_RESTORED,      // carried forward from the last known epoch
+    QN_CLOCK_SYNCED,        // set by SNTP this session (or the host, in the sim)
+} QnClockSource;
+
+QnClockSource hal_clock_source(void);
+void          hal_clock_persist(void);   // save the current epoch (no-op in sim)
+
 // --- UI sounds -----------------------------------------------------------
 // Short UI tick for menu scrolling / selection. Cheap and rate-safe; `accent`
 // marks confirm clicks (slightly brighter tick).

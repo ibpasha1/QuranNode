@@ -165,6 +165,10 @@ uint32_t plat_millis(void) { return SDL_GetTicks(); }
 // --- Wall clock (host time) ------------------------------------------------
 int64_t hal_wall_clock(void) { return (int64_t)time(NULL); }
 
+// The host always has a real clock, and nothing needs carrying across runs.
+QnClockSource hal_clock_source(void) { return QN_CLOCK_SYNCED; }
+void hal_clock_persist(void) {}
+
 int hal_tz_offset_min(void)
 {
     time_t t = time(NULL);

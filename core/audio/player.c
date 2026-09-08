@@ -35,6 +35,7 @@ static void open_clip(Player *p)
     if (!p->clip) QN_LOGE(TAG, "no audio: %s", path);
     hal_audio_set_rate(p->clip, p->rate);
     p->active_word = -1;
+    p->played_max_ms = 0;
 }
 
 void player_load(Player *p, int surah, int ayah)
@@ -56,7 +57,8 @@ void player_load(Player *p, int surah, int ayah)
 void player_play(Player *p)
 {
     if (!p->clip) return;
-    hal_audio_play(p->clip);
+    hal_audio_play(p->clip);   // (re)starts from the top, so the mark resets too
+    p->played_max_ms = 0;
     p->playing = true;
 }
 
@@ -170,11 +172,21 @@ void player_update(Player *p)
     }
 
     uint32_t pos = hal_audio_pos_ms(p->clip);
+    if (pos > p->played_max_ms) p->played_max_ms = pos;
     if (p->timing_ok)
         p->active_word = timing_active_word(&p->timing, p->ayah, pos);
 
     // End-of-clip: we intended to play, but it stopped on its own.
     if (p->playing && !hal_audio_is_playing(p->clip)) {
+        // Reaching the end after most of the clip actually played means the
+        // ayah was heard. Guarded on the high-water mark so a failed open or
+        // an instant stop can't mint reading credit for free.
+        uint32_t len = hal_audio_len_ms(p->clip);
+        if (len && (uint64_t)p->played_max_ms * 4 >= (uint64_t)len * 3) {
+            p->done_surah = p->surah;
+            p->done_ayah  = p->ayah;
+            p->done_seq++;
+        }
         if (p->loop.active) {
             loop_on_ayah_end(p);
         } else if (p->autoplay_next && p->ayah < p->ayah_max) {

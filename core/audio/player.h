@@ -39,6 +39,13 @@ typedef struct {
     TimingTable timing;
     bool  timing_ok;
 
+    // "This ayah was actually heard" signal, for the reading tracker. done_seq
+    // ticks once per clip that reached its natural end after most of it played;
+    // consumers watch for the change rather than polling a flag they'd race.
+    uint32_t played_max_ms;   // high-water playhead for the current clip
+    int      done_surah, done_ayah;
+    uint32_t done_seq;
+
     // Loop state.
     LoopConfig loop;
     int   loop_each_i;        // which repeat of the current ayah (0-based)

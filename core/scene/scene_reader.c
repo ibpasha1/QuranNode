@@ -9,6 +9,7 @@
 #include "arabic_text.h"
 #include "player.h"
 #include "progress.h"
+#include "khatm.h"
 #include "prefs.h"
 #include "quran_db.h"
 #include "theme.h"
@@ -90,14 +91,30 @@ static void save_resume(void)
 
 static void on_tick(uint32_t dt_ms)
 {
-    (void)dt_ms;
     player_update(&s_player);
 
-    // Persist the resume point whenever the position changes (cheap; ayat are
-    // seconds long). This is what makes one-press resume land exactly here.
+    // Reading credit. An ayah counts once it has been on screen long enough to
+    // plausibly have been read, or once its recitation played through — the
+    // player raises done_seq for the latter. khatm_focus() is fed the word
+    // count in on_render, where the glyph pack is available.
+    static uint32_t last_done = 0;
+    if (s_player.done_seq != last_done) {
+        last_done = s_player.done_seq;
+        khatm_audio_complete(s_player.done_surah, s_player.done_ayah);
+    }
+    khatm_tick(dt_ms);
+
+    // Persist the resume point once the position SETTLES. Saving on every
+    // change looked cheap, but a held encoder ramps to a ~40ms repeat, which
+    // meant ~25 SD writes a second while scrolling.
     static int last_s = -1, last_a = -1;
+    static bool pending = false;
     if (s_player.surah != last_s || s_player.ayah != last_a) {
         last_s = s_player.surah; last_a = s_player.ayah;
+        pending = true;
+    }
+    if (pending && khatm_focus_dwell_ms() >= 1500) {
+        pending = false;
         save_resume();
     }
     if (s_bm_toast > 0) s_bm_toast--;
@@ -107,6 +124,7 @@ static void on_tick(uint32_t dt_ms)
 static void on_leave(void)
 {
     save_resume();
+    khatm_flush();
 }
 
 // Tajweed palette — index matches tools/shape_quran.py RULE_COLOR / PREVIEW_PALETTE.
@@ -137,6 +155,40 @@ static int draw_ayah(Canvas *c, int surah, int ayah, int top, color_t col, int h
     return g.h;
 }
 
+// Reading-credit chrome, in the 9px gap between the header and the text band.
+//
+// Top: one segment per ayah on the current mushaf page, lit where you've read
+// it — "how much of this page is done" at a glance. Below it: the dwell bar for
+// the ayah you're on, filling until it counts. Showing the dwell is the point;
+// without it, crediting looks arbitrary and people wonder why a page they
+// flicked through didn't register.
+static void draw_page_strip(Canvas *c, int page, int surah, int ayah)
+{
+    if (page < 1) return;
+    const int x0 = 12, w = CANVAS_WIDTH - 24, y = 16;
+    int n = qdb_page_ayah_count(page);
+    if (n < 1) return;
+    int first = qdb_page_first_global(page);
+    int here = qdb_global_index(surah, ayah);
+
+    for (int i = 0; i < n; i++) {
+        int sx = x0 + (w * i) / n;
+        int sw = x0 + (w * (i + 1)) / n - sx - 1;
+        if (sw < 1) sw = 1;
+        QRef r = qdb_from_global(first + i);
+        color_t col = (first + i == here) ? THEME_ACCENT
+                    : khatm_is_read(r.surah, r.ayah) ? THEME_ACTIVE
+                    : THEME_GRID;
+        canvas_rect_fill(c, sx, y, sw, 3, col);
+    }
+
+    if (!khatm_focus_credited()) {
+        float f = khatm_focus_dwell_frac();
+        canvas_rect_fill(c, x0, y + 5, w, 2, THEME_PANEL);
+        if (f > 0.f) canvas_rect_fill(c, x0, y + 5, (int)(w * f), 2, THEME_BAR);
+    }
+}
+
 static void on_render(Canvas *c)
 {
     theme_clear(c);
@@ -152,11 +204,15 @@ static void on_render(Canvas *c)
     int surah = s_player.surah, ayah = s_player.ayah;
 
     // Header: surah name + reference (a leading * marks a bookmarked ayah).
-    char ref[20];
+    char ref[28];
     bool marked = progress_is_bookmarked(surah, ayah);
-    snprintf(ref, sizeof(ref), "%s%d:%d", marked ? "* " : "", surah, ayah);
+    int page = qdb_page_of(surah, ayah);
+    snprintf(ref, sizeof(ref), "%s%d:%d  p%d", marked ? "* " : "", surah, ayah,
+             page);
     theme_header(c, surah_name(surah), THEME_TITLE, ref,
                  marked ? THEME_BADGE : THEME_LABEL);
+
+    draw_page_strip(c, page, surah, ayah);
 
     // Current ayah, centered in the main band; prev/next dimmed around it.
     AyahGlyphs cur;
@@ -168,6 +224,10 @@ static void on_render(Canvas *c)
         theme_hint(c, "<> ayah    BACK home");
         return;
     }
+    // The word count sizes the dwell needed to credit this ayah as read. It is
+    // only known once the pack has loaded, so it arrives here rather than in
+    // on_tick (which runs first on the very frame an ayah changes).
+    khatm_focus(surah, ayah, cur.n_words);
     // The transport panel is opaque and drawn AFTER the text, so no ayah can
     // ever collide with the position bar / reciter line again — overflow is
     // cleanly clipped behind the panel instead.

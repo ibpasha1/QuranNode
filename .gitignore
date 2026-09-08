@@ -3,6 +3,8 @@ build/
 quran-sim
 quran-dump
 quran-loop-test
+quran-qdb-test
+quran-khatm-test
 tools/.cache/
 
 # Wi-Fi credentials — NEVER commit (see firmware/secrets.ini.example)

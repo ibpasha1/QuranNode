@@ -20,10 +20,15 @@
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_crt_bundle.h"
+#include "esp_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
+
+// Implemented in hal_esp32.c — promotes the clock to "synced" once SNTP lands.
+void hal_clock_mark_synced(void);
 
 // GitHub repo to pull firmware from (set via -DOTA_REPO="owner/repo").
 #ifndef OTA_REPO
@@ -231,6 +236,46 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+// -------------------------------------------------------------------------
+// Time sync. The board has no RTC, so every boot starts at 1970 and the whole
+// reading tracker (plus prayer times) has no date to work from. Wi-Fi is only
+// ever up during the OTA window, so that is where we grab the time.
+// -------------------------------------------------------------------------
+#define CLOCK_VALID_AFTER 1600000000   // ~2020-09-13; below this the clock is unset
+
+static void time_sync_start(void)
+{
+    static bool inited = false;
+    if (inited) return;
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_setservername(1, "time.google.com");
+    // Step, don't slew: jumping from 1970 to now is exactly what we want, and
+    // there is no RTC to keep smooth in the first place.
+    sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
+    esp_sntp_init();
+    inited = true;
+    ESP_LOGI(TAG, "SNTP started");
+}
+
+// Block briefly for the first sync, then save it. Called before the radio goes
+// down — this boot window is the device's only scheduled chance at the date.
+static void time_sync_wait(int timeout_ms)
+{
+    if (time(NULL) > CLOCK_VALID_AFTER) { hal_clock_persist(); return; }
+    for (int i = 0; i < timeout_ms / 100 && time(NULL) <= CLOCK_VALID_AFTER; i++)
+        vTaskDelay(pdMS_TO_TICKS(100));
+    if (time(NULL) > CLOCK_VALID_AFTER) {
+        hal_clock_mark_synced();
+        hal_clock_persist();
+        time_t t = time(NULL);
+        ESP_LOGI(TAG, "clock synced: %s", ctime(&t));
+    } else {
+        ESP_LOGW(TAG, "SNTP did not land in %dms — clock stays approximate",
+                 timeout_ms);
+    }
+}
+
 // Bring up Wi-Fi STA (once) and wait up to timeout_ms for an IP. Idempotent —
 // safe to call from both the boot update-check and the manual update path.
 static bool s_wifi_inited = false;
@@ -255,6 +300,9 @@ static bool wifi_up(int timeout_ms)
     esp_wifi_set_ps(WIFI_PS_NONE);   // radio always-on (modem-sleep drops HTTP under load)
     ESP_LOGW(TAG, "connecting to Wi-Fi \"%s\"…", WIFI_SSID);
     for (int i = 0; i < timeout_ms / 100 && !s_ip[0]; i++) vTaskDelay(pdMS_TO_TICKS(100));
+    // Every path that gets an IP also gets a clock — SNTP runs in the
+    // background from here and costs nothing if the time is already good.
+    if (s_ip[0]) time_sync_start();
     return s_ip[0] != 0;
 }
 
@@ -378,6 +426,7 @@ bool hal_ota_boot_check(void)
     char latest[48];
     if (!http_get_text(OTA_VER_URL, latest, sizeof(latest))) {
         ESP_LOGW(TAG, "version check failed — skipping");
+        time_sync_wait(4000);   // still worth the date before the radio goes
         wifi_down();
         return false;
     }
@@ -386,6 +435,9 @@ bool hal_ota_boot_check(void)
         latest[i] = '\0';
 
     ESP_LOGW(TAG, "auto-update: installed=%s latest=%s", FW_VERSION, latest);
+    // Grab the date while the radio is still up — this boot window is the only
+    // networking the device does in a normal session.
+    time_sync_wait(4000);
     if (strcmp(latest, FW_VERSION) == 0) { wifi_down(); return false; }  // up to date
     return true;   // newer/different available — leave Wi-Fi up for hal_ota_apply()
 }

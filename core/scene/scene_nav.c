@@ -1,11 +1,13 @@
-// scene_nav.c — jump navigation (Surah / Juz / Bookmarks).
+// scene_nav.c — jump navigation (Surah / Juz / Page / Bookmarks).
 //
-// Replaces endless scrolling: pick a way in (by surah, by juz, or a saved
-// bookmark) and land in the reader at that exact ayah. Surahs that aren't in the
-// bundled sample yet are shown dimmed so it's clear what has content.
+// Replaces endless scrolling: pick a way in (by surah, by juz, by mushaf page,
+// or a saved bookmark) and land in the reader at that exact ayah. Surahs that
+// aren't in the bundled sample yet are shown dimmed so it's clear what has
+// content, and each entry carries how much of it you've already read.
 #include "scene.h"
 #include "player.h"
 #include "progress.h"
+#include "khatm.h"
 #include "quran_db.h"
 #include "theme.h"
 #include "font.h"
@@ -15,11 +17,12 @@
 #include "plat.h"
 #include <stdio.h>
 
-typedef enum { NAV_ROOT, NAV_SURAH, NAV_JUZ, NAV_BOOKMARKS } NavMode;
+typedef enum { NAV_ROOT, NAV_SURAH, NAV_JUZ, NAV_PAGE, NAV_BOOKMARKS,
+               NAV_MODE_COUNT } NavMode;
 
 static NavMode s_mode = NAV_ROOT;
-static int s_sel[4];      // selection per mode
-static int s_scroll[4];   // scroll per mode
+static int s_sel[NAV_MODE_COUNT];      // selection per mode
+static int s_scroll[NAV_MODE_COUNT];   // scroll per mode
 static InputAccel s_accel;   // hold-to-scroll ramp for the long lists
 
 #define ROW_H 18
@@ -32,15 +35,27 @@ static InputAccel s_accel;   // hold-to-scroll ramp for the long lists
 // The bundled sample only has content for these surahs (extend as data grows).
 static bool content_available(int surah) { return surah == 1; }
 
+// Root launcher rows. Keep in sync with ROOT_ROWS in render_root() and enter().
+#define N_ROOT 6
+
 static int list_count(void)
 {
     switch (s_mode) {
-    case NAV_ROOT:      return 4;
+    case NAV_ROOT:      return N_ROOT;
     case NAV_SURAH:     return QDB_SURAH_COUNT;
     case NAV_JUZ:       return QDB_JUZ_COUNT;
+    case NAV_PAGE:      return QDB_PAGE_COUNT;
     case NAV_BOOKMARKS: return progress_bookmark_count();
+    default:            return 0;
     }
-    return 0;
+}
+
+// "100%" / "42%" / "" when untouched — the read fraction of a list entry.
+static void pct_str(float frac, char *b, int n)
+{
+    int p = (int)(frac * 100.f + 0.5f);
+    if (p <= 0) b[0] = 0;
+    else snprintf(b, n, "%d%%", p);
 }
 
 // Fill the three columns of a list row: leading index (soft blue), main name,
@@ -55,18 +70,36 @@ static void row_cols(int i, char *idx, int ni, char *name, int nn,
         break;   // root uses its own launcher rows
     case NAV_SURAH: {
         int s = i + 1;
+        char pct[8];
+        pct_str(khatm_surah_frac(s), pct, sizeof pct);
         snprintf(idx, ni, "%d", s);
         snprintf(name, nn, "%s", qdb_surah_name(s));
-        snprintf(detail, nd, "%d ayat", qdb_ayah_count(s));
+        if (pct[0]) snprintf(detail, nd, "%d ayat  %s", qdb_ayah_count(s), pct);
+        else        snprintf(detail, nd, "%d ayat", qdb_ayah_count(s));
         *dim = !content_available(s);
         break;
     }
     case NAV_JUZ: {
         int j = i + 1;
         QRef r = qdb_juz_start(j);
+        char pct[8];
+        pct_str(khatm_juz_frac(j), pct, sizeof pct);
         snprintf(idx, ni, "%d", j);
         snprintf(name, nn, "%s", qdb_surah_name(r.surah));
-        snprintf(detail, nd, "%d:%d", r.surah, r.ayah);
+        if (pct[0]) snprintf(detail, nd, "p%d  %s", qdb_juz_page(j), pct);
+        else        snprintf(detail, nd, "p%d", qdb_juz_page(j));
+        *dim = !content_available(r.surah);
+        break;
+    }
+    case NAV_PAGE: {
+        int p = i + 1;
+        QRef r = qdb_page_start(p);
+        char pct[8];
+        pct_str(khatm_page_frac(p), pct, sizeof pct);
+        snprintf(idx, ni, "%d", p);
+        snprintf(name, nn, "%s", qdb_surah_name(r.surah));
+        if (pct[0]) snprintf(detail, nd, "%d:%d  %s", r.surah, r.ayah, pct);
+        else        snprintf(detail, nd, "%d:%d", r.surah, r.ayah);
         *dim = !content_available(r.surah);
         break;
     }
@@ -77,6 +110,7 @@ static void row_cols(int i, char *idx, int ni, char *name, int nn,
         *dim = !content_available(b.surah);
         break;
     }
+    default: break;
     }
 }
 
@@ -93,41 +127,48 @@ static const char *mode_title(void)
     case NAV_ROOT: return "NAVIGATE";
     case NAV_SURAH: return "NAVIGATE / SURAH";
     case NAV_JUZ: return "NAVIGATE / JUZ";
+    case NAV_PAGE: return "NAVIGATE / PAGE";
     case NAV_BOOKMARKS: return "NAVIGATE / BOOKMARKS";
+    default: return "";
     }
-    return "";
 }
 
-// The root menu as four launcher rows: icon, name, and a live detail line.
+// The root menu as launcher rows: icon, name, and a live detail line.
+static const struct { const char *label; UiIcon icon; } ROOT_ROWS[N_ROOT] = {
+    { "By Surah",  ICON_NOTE },
+    { "By Juz",    ICON_FOLDER },
+    { "By Page",   ICON_BOOK },
+    { "Bookmarks", ICON_INFO },
+    { "Progress",  ICON_INFO },
+    { "Settings",  ICON_GEAR },
+};
+
 static void render_root(Canvas *c)
 {
-    static const struct { const char *label; UiIcon icon; } R[4] = {
-        { "By Surah",  ICON_NOTE },
-        { "By Juz",    ICON_FOLDER },
-        { "Bookmarks", ICON_INFO },
-        { "Settings",  ICON_GEAR },
-    };
     int sel = s_sel[NAV_ROOT];
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < N_ROOT; i++) {
         int y = LIST_TOP + 6 + i * (ROOT_ROW_H + 6);
         bool is_sel = (i == sel);
         char detail[24];
         switch (i) {
         case 0:  snprintf(detail, sizeof(detail), "114"); break;
         case 1:  snprintf(detail, sizeof(detail), "30"); break;
-        case 2:  snprintf(detail, sizeof(detail), "%d", progress_bookmark_count()); break;
+        case 2:  snprintf(detail, sizeof(detail), "604"); break;
+        case 3:  snprintf(detail, sizeof(detail), "%d", progress_bookmark_count()); break;
+        case 4:  snprintf(detail, sizeof(detail), "%d%%",
+                          (int)(khatm_stats()->percent + 0.5f)); break;
         default: detail[0] = 0; break;
         }
-        bool dim = (i == 2 && progress_bookmark_count() == 0);
+        bool dim = (i == 3 && progress_bookmark_count() == 0);
 
         if (is_sel) theme_sel_block(c, 6, y, CANVAS_WIDTH - 12, ROOT_ROW_H);
         else        canvas_rect(c, 6, y, CANVAS_WIDTH - 12, ROOT_ROW_H, THEME_GRID);
 
         color_t fg = is_sel ? THEME_SEL_TEXT : (dim ? THEME_DIM : THEME_TEXT);
-        theme_icon(c, 18, y + (ROOT_ROW_H - 9) / 2, R[i].icon,
+        theme_icon(c, 18, y + (ROOT_ROW_H - 9) / 2, ROOT_ROWS[i].icon,
                    is_sel ? THEME_SEL_TEXT : THEME_LABEL,
                    is_sel ? THEME_SEL_BG : THEME_BG);
-        font_draw_string(c, 38, y + (ROOT_ROW_H - 14) / 2, &font_small, R[i].label, fg);
+        font_draw_string(c, 38, y + (ROOT_ROW_H - 14) / 2, &font_small, ROOT_ROWS[i].label, fg);
         if (detail[0])
             font_draw_string_right(c, CANVAS_WIDTH - 18, y + (ROOT_ROW_H - 7) / 2,
                                    &font_tiny, detail,
@@ -219,8 +260,14 @@ static void enter(void)
     int sel = s_sel[s_mode];
     switch (s_mode) {
     case NAV_ROOT:
-        if (sel == 3) { scene_switch(SCENE_SETTINGS); return; }
-        s_mode = (sel == 0) ? NAV_SURAH : (sel == 1) ? NAV_JUZ : NAV_BOOKMARKS;
+        switch (sel) {
+        case 0: s_mode = NAV_SURAH; break;
+        case 1: s_mode = NAV_JUZ; break;
+        case 2: s_mode = NAV_PAGE; break;
+        case 3: s_mode = NAV_BOOKMARKS; break;
+        case 4: scene_switch(SCENE_PROGRESS); return;
+        default: scene_switch(SCENE_SETTINGS); return;
+        }
         break;
     case NAV_SURAH:
         jump_to(sel + 1, 1);
@@ -230,11 +277,17 @@ static void enter(void)
         jump_to(r.surah, r.ayah);
         break;
     }
+    case NAV_PAGE: {
+        QRef r = qdb_page_start(sel + 1);
+        jump_to(r.surah, r.ayah);
+        break;
+    }
     case NAV_BOOKMARKS: {
         Bookmark b = progress_bookmark(sel);
         jump_to(b.surah, b.ayah);
         break;
     }
+    default: break;
     }
 }
 
