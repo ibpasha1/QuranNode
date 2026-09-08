@@ -3,8 +3,9 @@
 // The HALs emit a stream of repeated nav events while a key is held (SDL key
 // repeat in the sim; auto-repeat on hardware). Scenes feed each event through
 // input_accel_step() and get back how many rows to move: 1 for taps, ramping
-// to 2/4/8 the longer the same direction is held. Any pause or direction
-// change resets the ramp, so single presses always move exactly one row.
+// up to 32 the longer the same direction is held, so a hold sweeps a whole
+// long list. Any pause or direction change resets the ramp, so single presses
+// always move exactly one row.
 #pragma once
 #include <stdint.h>
 
