@@ -17,6 +17,7 @@
 #include "scene.h"
 #include "hifz.h"
 #include "hifz_drill.h"
+#include "wordmeaning.h"
 #include "arabic_text.h"
 #include "quran_db.h"
 #include "prefs.h"
@@ -42,8 +43,41 @@ static int  s_grade_sel;        // 0 = GOT, 1 = SHAKY, 2 = NO
 static const char *s_toast;
 static int  s_toast_ttl;
 
+// Word-by-word meaning sheet (toggled by MODE / RIGHT).
+static WordMeaning s_wm;
+static bool s_wm_ok;
+static bool s_sheet;            // meaning sheet open (drill paused while open)
+static int  s_selw;             // selected word, flattened over the segment
+
 // scene_hifz calls this, then scene_switch(SCENE_HIFZ_DRILL).
 void scene_hifz_drill_set_portion(int portion) { s_portion = portion; }
+
+static void toast(const char *m) { s_toast = m; s_toast_ttl = 90; }
+
+// The current segment's words, flattened over its (possibly multiple) ayat.
+static int seg_total_words(const HifzSeg *s, int surah)
+{
+    int n = 0;
+    for (int a = s->a0; a <= s->a1; a++) {
+        int wlo = (a == s->a0) ? s->w0 : 0;
+        int whi = (a == s->a1) ? s->w1 : qdb_word_count(surah, a) - 1;
+        n += whi - wlo + 1;
+    }
+    return n;
+}
+
+// Map flattened index -> (ayah, word-in-ayah). Returns false if out of range.
+static bool seg_word_ref(const HifzSeg *s, int surah, int idx, int *ayah, int *w)
+{
+    for (int a = s->a0; a <= s->a1; a++) {
+        int wlo = (a == s->a0) ? s->w0 : 0;
+        int whi = (a == s->a1) ? s->w1 : qdb_word_count(surah, a) - 1;
+        int cnt = whi - wlo + 1;
+        if (idx < cnt) { *ayah = a; *w = wlo + idx; return true; }
+        idx -= cnt;
+    }
+    return false;
+}
 
 static void open_pack(int surah)
 {
@@ -64,6 +98,8 @@ static void on_enter(void)
     s_applied = false;
     s_grade_sel = 0;
     s_toast_ttl = 0;
+    s_sheet = false;
+    s_selw = 0;
 
     const HifzPortion *p = hifz_portion(s_portion);
     if (!p || !p->first_g) { scene_switch(SCENE_HIFZ); return; }
@@ -82,6 +118,7 @@ static void on_enter(void)
     if (n <= 0) { scene_switch(SCENE_HIFZ); return; }
 
     open_pack(surah);
+    s_wm_ok = wordmeaning_open(&s_wm, surah);   // absent until the fetch is run
 
     HifzDrillCfg cfg = {
         .listen_reps = (uint8_t)hifz_cfg_listen_reps(),
@@ -95,13 +132,16 @@ static void on_leave(void)
 {
     hifz_drill_end();
     if (s_pack_ok) { glyphpack_close(&s_pack); s_pack_ok = false; s_pack_surah = -1; }
+    if (s_wm_ok) { wordmeaning_close(&s_wm); s_wm_ok = false; }
     hifz_flush();
 }
 
 static void on_tick(uint32_t dt_ms)
 {
     (void)dt_ms;
-    hifz_drill_tick(plat_millis());
+    // The meaning sheet pauses the drill — studying a word shouldn't burn the
+    // recall clock or auto-advance the phase out from under the reader.
+    if (!s_sheet) hifz_drill_tick(plat_millis());
     if (s_toast_ttl > 0) s_toast_ttl--;
 
     if (hifz_drill_done() && !s_applied) {
@@ -148,16 +188,18 @@ static const char *phase_hint(DrillPhase p)
 }
 
 // Draw one ayah of the current segment, veiled per the engine, into the band.
-// Returns the y just below what it drew.
+// Returns the y just below what it drew. `hl_word` highlights a chosen word
+// (the meaning-sheet selection), else the LISTEN active word.
 static int draw_seg_ayah(Canvas *c, int surah, int ayah, int wlo, int whi,
-                         int y, DrillPhase ph, VeilMode vm, int vpct)
+                         int y, DrillPhase ph, VeilMode vm, int vpct, int hl_word)
 {
     AyahGlyphs g;
     if (!s_pack_ok || !glyphpack_get(&s_pack, surah, ayah, &g)) return y;
     int x = (CANVAS_WIDTH - g.w) / 2;
 
-    int hl = -1;
-    if (ph == DRILL_LISTEN && ayah == g_player.ayah) hl = g_player.active_word;
+    int hl = hl_word;
+    if (hl < 0 && ph == DRILL_LISTEN && ayah == g_player.ayah)
+        hl = g_player.active_word;
     arabic_draw_ayah(c, x, y, &g, THEME_TEXT, hl, THEME_PLAYHEAD);
 
     if (vm != VEIL_NONE) {
@@ -184,11 +226,19 @@ static void render_band(Canvas *c, int band_top, int band_bot)
     hifz_drill_veil(&vm, &vpct);
     int surah = hifz_drill_surah();
 
+    // The meaning sheet reveals the text (veil off) and highlights the word.
+    int sel_ayah = -1, sel_w = -1;
+    if (s_sheet) {
+        vm = VEIL_NONE;
+        seg_word_ref(s, surah, s_selw, &sel_ayah, &sel_w);
+    }
+
     int y = band_top;
     for (int a = s->a0; a <= s->a1 && y < band_bot; a++) {
         int wlo = (a == s->a0) ? s->w0 : 0;
         int whi = (a == s->a1) ? s->w1 : qdb_word_count(surah, a) - 1;
-        y = draw_seg_ayah(c, surah, a, wlo, whi, y, ph, vm, vpct);
+        int hl = (a == sel_ayah) ? sel_w : -1;
+        y = draw_seg_ayah(c, surah, a, wlo, whi, y, ph, vm, vpct, hl);
     }
 }
 
@@ -227,6 +277,44 @@ static void render_countdown(Canvas *c, int y)
                         THEME_ACTIVE, THEME_GRID);
 }
 
+// The bottom meaning sheet: the selected word's position + its English gloss,
+// wrapped to the panel width. The Arabic word itself is highlighted in place up
+// in the band (render_band), so the eye maps gloss -> word without a second copy.
+static void render_sheet(Canvas *c, int top)
+{
+    const HifzSeg *s = hifz_drill_cur_seg();
+    int surah = hifz_drill_surah();
+    int total = s ? seg_total_words(s, surah) : 0;
+    int ayah = -1, w = -1;
+    const char *gloss = "";
+    if (s && seg_word_ref(s, surah, s_selw, &ayah, &w) && s_wm_ok)
+        gloss = wordmeaning_word(&s_wm, ayah, w);
+
+    int h = CANVAS_HEIGHT - THEME_KEYBAR_H - top;
+    canvas_rect_fill(c, 0, top, CANVAS_WIDTH, h, THEME_PANEL);
+    canvas_hline(c, 0, top, CANVAS_WIDTH, THEME_ACCENT);
+
+    char pos[24];
+    snprintf(pos, sizeof pos, "word %d / %d", s_selw + 1, total);
+    font_draw_string(c, 12, top + 6, &font_tiny, pos, THEME_LABEL);
+    font_draw_string_right(c, CANVAS_WIDTH - 12, top + 6, &font_tiny,
+                           s_wm_ok ? "MEANING" : "no meanings", THEME_DIM);
+
+    if (!gloss[0]) {
+        font_draw_string_centered(c, top + 30, &font_small,
+                                  s_wm_ok ? "(no meaning for this word)"
+                                          : "run tools/build_wordmeanings.py",
+                                  THEME_DIM);
+        return;
+    }
+    char lines[4][FONT_WRAP_LINE_CAP];
+    int n = font_wrap_lines(&font_small, gloss, CANVAS_WIDTH - 24,
+                            (char (*)[FONT_WRAP_LINE_CAP])lines, 4);
+    for (int i = 0; i < n; i++)
+        font_draw_string_centered(c, top + 26 + i * 18, &font_small, lines[i],
+                                  THEME_TEXT);
+}
+
 static void on_render(Canvas *c)
 {
     theme_clear(c);
@@ -245,7 +333,9 @@ static void on_render(Canvas *c)
     render_band(c, band_top, band_bot);
 
     int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 68;
-    if (ph == DRILL_ASSESS) {
+    if (s_sheet) {
+        render_sheet(c, iy - 8);
+    } else if (ph == DRILL_ASSESS) {
         render_assess(c, iy - 44);
     } else {
         font_draw_string_centered(c, iy, &font_medium, phase_name(ph),
@@ -262,8 +352,15 @@ static void on_render(Canvas *c)
     if (s_toast_ttl > 0 && s_toast)
         font_draw_string_centered(c, band_top + 4, &font_tiny, s_toast, THEME_BADGE);
 
-    // Keybar per phase.
-    if (ph == DRILL_ASSESS) {
+    // Keybar per state.
+    if (s_sheet) {
+        KeyChip k[2] = {
+            { "<>", "WORD", 4, { INPUT_NAV_LEFT, INPUT_NAV_RIGHT,
+                                 INPUT_ENC_CW, INPUT_ENC_CCW } },
+            { "MD", "CLOSE", 3, { INPUT_BTN_MODE, INPUT_NAV_SELECT, INPUT_BTN_BACK } },
+        };
+        theme_keybar(c, k, 2);
+    } else if (ph == DRILL_ASSESS) {
         KeyChip k[2] = {
             { "^v", "CHOOSE", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN,
                                    INPUT_ENC_CW, INPUT_ENC_CCW } },
@@ -274,14 +371,15 @@ static void on_render(Canvas *c)
         KeyChip k[1] = { { "", "", 0, { INPUT_NONE } } };
         theme_keybar(c, k, 1);
     } else {
-        KeyChip k[4] = {
+        KeyChip k[5] = {
             { "OK", ph == DRILL_LISTEN ? "SKIP" : "DONE", 2,
               { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
             { "<", "AGAIN", 2, { INPUT_NAV_LEFT, INPUT_ENC_CCW } },
             { "v", "PEEK", 1, { INPUT_NAV_DOWN } },
+            { ">", "MEANING", 2, { INPUT_NAV_RIGHT, INPUT_BTN_MODE } },
             { "BK", "STOP", 1, { INPUT_BTN_BACK } },
         };
-        theme_keybar(c, k, 4);
+        theme_keybar(c, k, 5);
     }
 }
 
@@ -292,6 +390,24 @@ static void on_input(InputEvent e)
 {
     uint32_t now = plat_millis();
     DrillPhase ph = hifz_drill_phase();
+
+    // Meaning sheet takes over input while open (the drill is paused).
+    if (s_sheet) {
+        const HifzSeg *s = hifz_drill_cur_seg();
+        int total = s ? seg_total_words(s, hifz_drill_surah()) : 0;
+        switch (e.type) {
+        case INPUT_NAV_RIGHT:
+        case INPUT_ENC_CW:  if (s_selw < total - 1) { s_selw++; hal_audio_click(false); } break;
+        case INPUT_NAV_LEFT:
+        case INPUT_ENC_CCW: if (s_selw > 0) { s_selw--; hal_audio_click(false); } break;
+        case INPUT_BTN_MODE:
+        case INPUT_NAV_SELECT:
+        case INPUT_ENC_PUSH:
+        case INPUT_BTN_BACK: hal_audio_click(true); s_sheet = false; break;
+        default: break;
+        }
+        return;
+    }
 
     if (ph == DRILL_ASSESS) {
         switch (e.type) {
@@ -325,6 +441,16 @@ static void on_input(InputEvent e)
         hifz_drill_repeat(now);
         break;
     case INPUT_NAV_DOWN:
+        hifz_drill_peek(now);
+        break;
+    case INPUT_NAV_RIGHT:
+    case INPUT_BTN_MODE:
+        // Open the meaning sheet. It reveals the text, so it counts as a peek
+        // (harmless in LISTEN/ECHO, honest during recall).
+        if (!s_wm_ok) { toast("Meanings not installed"); break; }
+        hal_audio_click(true);
+        s_sheet = true;
+        s_selw = 0;
         hifz_drill_peek(now);
         break;
     case INPUT_BTN_BACK:
