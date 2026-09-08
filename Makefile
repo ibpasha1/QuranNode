@@ -57,7 +57,8 @@ khatm-test:
 # Memorization scheduler: tier transitions, intervals, plan, persistence, clock.
 hifz-test:
 	$(CC) -std=c11 -O2 $(INCLUDES) tools/hifz_test.c core/quran/hifz.c \
-	      core/quran/qday.c core/quran/quran_db.c -o quran-hifz-test -lm
+	      core/quran/qday.c core/quran/quran_db.c core/quran/waqf.c \
+	      -o quran-hifz-test -lm
 	./quran-hifz-test
 
 # Deterministic unit test for the Ayah Loop engine (no SDL/audio).

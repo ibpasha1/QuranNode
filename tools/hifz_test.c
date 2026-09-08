@@ -11,6 +11,7 @@
 #include "hifz.h"
 #include "qday.h"
 #include "quran_db.h"
+#include "waqf.h"
 #include "hal.h"
 #include <stdio.h>
 #include <string.h>
@@ -236,6 +237,19 @@ int main(void)
         }
         CHECK(total == qdb_word_count(2, 282), "segments cover %d of %d words",
               total, qdb_word_count(2, 282));
+        // No segment may exceed the band limit (target*3/2 = 60 words).
+        for (int i = 0; i < n; i++)
+            CHECK(seg[i].w1 - seg[i].w0 + 1 <= 60, "segment %d over the band", i);
+        // Interior cuts should land on real waqf marks (natural phrase ends),
+        // not arbitrary word intervals.
+        unsigned char mk[80];
+        int nm = waqf_marks(2, 282, mk, (int)sizeof mk);
+        CHECK(nm > 0, "no waqf marks for 2:282 — table not linked?");
+        for (int i = 0; i + 1 < n; i++) {   // every cut except the final tail
+            bool on_mark = false;
+            for (int k = 0; k < nm; k++) if (mk[k] == seg[i].w1) { on_mark = true; break; }
+            CHECK(on_mark, "cut after word %d is not a waqf boundary", seg[i].w1);
+        }
 
         // A short surah collapses into one segment spanning whole ayat.
         n = hifz_chunk(114, 1, 6, 40, seg, 64);

@@ -1,6 +1,7 @@
 #include "hifz.h"
 #include "qday.h"
 #include "quran_db.h"
+#include "waqf.h"
 #include "hal.h"
 #include "plat.h"
 #include <stddef.h>
@@ -827,6 +828,45 @@ int hifz_seg_words(int surah, const HifzSeg *s)
     return n + s->w1 + 1;                              // head of the last
 }
 
+// Split one over-long ayah [0..w-1] of `surah:a` into segments of about
+// target_words, cutting at waqf (pause) marks where it can so each segment is a
+// natural phrase, and never exceeding target*3/2 (the screen band). Segments
+// tile exactly. Returns the new segment count.
+static int split_long_ayah(int surah, int a, int w, int target,
+                           HifzSeg *out, int max, int n)
+{
+    unsigned char marks[80];
+    int nm = waqf_marks(surah, a, marks, (int)(sizeof marks));
+    int hardmax = target * 3 / 2;
+    if (hardmax < 1) hardmax = 1;
+
+    int start = 0, last = w - 1;
+    while (start <= last && n < max) {
+        if (last - start + 1 <= hardmax) {           // the rest fits in one part
+            out[n].a0 = out[n].a1 = (int16_t)a;
+            out[n].w0 = (int16_t)start; out[n].w1 = (int16_t)last;
+            n++; break;
+        }
+        int limit = start + hardmax - 1;             // furthest this part may end
+        int cut = -1, bestdist = 1 << 30;
+        for (int k = 0; k < nm; k++) {
+            int m = marks[k];
+            if (m < start) continue;
+            if (m > limit || m >= last) break;        // sorted; keep a real tail
+            int size = m - start + 1;
+            int dist = size > target ? size - target : target - size;
+            if (dist < bestdist) { bestdist = dist; cut = m; }
+        }
+        if (cut < 0) cut = start + target - 1;        // no waqf here: even cut
+        if (cut > last) cut = last;
+        out[n].a0 = out[n].a1 = (int16_t)a;
+        out[n].w0 = (int16_t)start; out[n].w1 = (int16_t)cut;
+        n++;
+        start = cut + 1;
+    }
+    return n;
+}
+
 int hifz_chunk(int surah, int a0, int a1, int target_words, HifzSeg *out, int max)
 {
     if (!out || max <= 0 || a0 < 1 || a1 < a0) return 0;
@@ -853,18 +893,7 @@ int hifz_chunk(int surah, int a0, int a1, int target_words, HifzSeg *out, int ma
                 n++; pend_a0 = -1; pend_words = 0;
                 if (n >= max) break;
             }
-            int parts = (w + target_words - 1) / target_words;
-            if (parts < 1) parts = 1;
-            int done = 0;
-            for (int i = 0; i < parts && n < max; i++) {
-                int take = (w - done) / (parts - i);
-                if (take < 1) take = 1;
-                out[n].a0 = out[n].a1 = (int16_t)a;
-                out[n].w0 = (int16_t)done;
-                out[n].w1 = (int16_t)(done + take - 1);
-                done += take;
-                n++;
-            }
+            n = split_long_ayah(surah, a, w, target_words, out, max, n);
             a++;
             continue;
         }
