@@ -34,9 +34,17 @@ sdcard/state/
 # OS cruft
 .DS_Store
 
+# Python bytecode caches (regenerated; never track)
+__pycache__/
+
 # Third-party tajweed classifier clone (used only by shape_quran.py)
 tools/quran-tajweed/
 
 # Training takes: user voice recordings — never publish
 training_takes/
+training_takes*/
 server/.venv/
+server/__pycache__/
+
+# Recitation-eval harness binary (build artifact)
+quran-recite-eval
