@@ -20,6 +20,9 @@
 #include <stdio.h>
 #include <string.h>
 
+// The drill is a separate scene; it takes a portion and grades it on return.
+void scene_hifz_drill_set_portion(int portion);
+
 typedef enum { VIEW = 0, PICK_TARGET, GRADE } Mode;
 
 static Mode s_mode;
@@ -279,14 +282,15 @@ static void render_view(Canvas *c)
         font_draw_string_centered(c, ty + 4, &font_tiny, s_toast_msg, THEME_ACCENT);
     }
 
-    KeyChip chips[4] = {
+    KeyChip chips[5] = {
         { "^v", "PICK", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN,
                              INPUT_ENC_CW, INPUT_ENC_CCW } },
-        { "OK", s_nrows ? "GRADE" : "NEW", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
+        { "OK", s_nrows ? "DRILL" : "NEW", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
+        { "<",  s_nrows ? "GRADE" : "", s_nrows ? 1 : 0, { INPUT_NAV_LEFT } },
         { ">",  "TARGET", 1, { INPUT_NAV_RIGHT } },
         { "BK", "HOME", 1, { INPUT_BTN_BACK } },
     };
-    theme_keybar(c, chips, 4);
+    theme_keybar(c, chips, 5);
 }
 
 // --- grading overlay ------------------------------------------------------
@@ -485,9 +489,10 @@ static void on_input(InputEvent e)
     case INPUT_ENC_PUSH:
         hal_audio_click(true);
         if (s_nrows > 0) {
-            s_grade_task = s_sel;
-            s_grade_sel = 0;
-            s_mode = GRADE;
+            // OK drills the selected portion — the drill is the better way to
+            // earn a grade. Hand-grading stays on LEFT for review-on-a-walk.
+            scene_hifz_drill_set_portion(s_rows[s_sel].portion);
+            scene_switch(SCENE_HIFZ_DRILL);
         } else if (hifz_plan()->sabaq_blocked) {
             toast("Clear the overdue review first");
         } else if (hifz_start_new_portion() >= 0) {
@@ -495,6 +500,15 @@ static void on_input(InputEvent e)
             toast("New portion ready");
         } else {
             toast("Nothing left in this target");
+        }
+        break;
+    case INPUT_NAV_LEFT:
+        // Hand-grade from memory, no drill — a hafiz reviewing on a walk.
+        if (s_nrows > 0) {
+            hal_audio_click(true);
+            s_grade_task = s_sel;
+            s_grade_sel = 0;
+            s_mode = GRADE;
         }
         break;
     case INPUT_NAV_RIGHT:

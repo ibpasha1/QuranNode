@@ -19,6 +19,7 @@ void scene_settings_register(void);
 void scene_teacher_register(void);
 void scene_progress_register(void);
 void scene_hifz_register(void);
+void scene_hifz_drill_register(void);
 
 void scene_register(SceneID id, const SceneCallbacks *cb)
 {
@@ -38,6 +39,7 @@ void scene_init(void)
     scene_teacher_register();
     scene_progress_register();
     scene_hifz_register();
+    scene_hifz_drill_register();
 
     s_current = SCENE_HOME;
     if (s_scenes[s_current].on_enter) s_scenes[s_current].on_enter();
