@@ -19,6 +19,8 @@
 #include "hifz_drill.h"
 #include "wordmeaning.h"
 #include "arabic_text.h"
+#include "recite.h"
+#include "voice_activity.h"
 #include "quran_db.h"
 #include "prefs.h"
 #include "player.h"
@@ -28,9 +30,17 @@
 #include "hal.h"
 #include "plat.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define DRILL_TARGET_WORDS 40   // ~half a page: fits the band at reader_sm
+
+// Optional mic scoring (mirrors the teacher's sizing; freed on scene exit so two
+// scenes never pin ~6.4 MB of PSRAM at once).
+#define MIC_HZ      16000
+#define REC_MAX_N   (MIC_HZ * 40)      // 40s recording cap
+#define REF_MAX_N   (44100 * 22)       // reference PCM cap (~22s)
+#define DRILL_MAX_WORDS 64
 
 static int  s_portion = -1;     // set by scene_hifz before switching in
 static bool s_applied;          // grades committed to hifz on completion
@@ -48,6 +58,17 @@ static WordMeaning s_wm;
 static bool s_wm_ok;
 static bool s_sheet;            // meaning sheet open (drill paused while open)
 static int  s_selw;             // selected word, flattened over the segment
+
+// Optional mic scoring during RECALL. Verdicts SUGGEST, never commit: an offline
+// analysis pre-selects a grade (downward only — its reliable signal is omission
+// detection, not correctness) and the user still presses OK.
+typedef enum { MIC_OFF = 0, MIC_REC, MIC_ANALYZE } MicState;
+static MicState s_mic;
+static int16_t *s_rec, *s_ref;         // malloc'd on first use, freed on exit
+static uint32_t s_rec_n, s_ref_n, s_ref_hz;
+static VoiceActivity s_va;
+static int  s_suggest = -1;            // -1 = none, else 0/1/2 grade index
+static const char *s_suggest_msg;
 
 // scene_hifz calls this, then scene_switch(SCENE_HIFZ_DRILL).
 void scene_hifz_drill_set_portion(int portion) { s_portion = portion; }
@@ -100,6 +121,10 @@ static void on_enter(void)
     s_toast_ttl = 0;
     s_sheet = false;
     s_selw = 0;
+    s_mic = MIC_OFF;
+    s_suggest = -1;
+    s_suggest_msg = NULL;
+    s_rec_n = s_ref_n = 0;
 
     const HifzPortion *p = hifz_portion(s_portion);
     if (!p || !p->first_g) { scene_switch(SCENE_HIFZ); return; }
@@ -131,14 +156,103 @@ static void on_enter(void)
 static void on_leave(void)
 {
     hifz_drill_end();
+    hal_mic_stop();
     if (s_pack_ok) { glyphpack_close(&s_pack); s_pack_ok = false; s_pack_surah = -1; }
     if (s_wm_ok) { wordmeaning_close(&s_wm); s_wm_ok = false; }
+    // Free the big capture buffers — finding 4: two scenes would otherwise pin
+    // ~6.4 MB of PSRAM between them.
+    free(s_rec); s_rec = NULL;
+    free(s_ref); s_ref = NULL;
     hifz_flush();
+}
+
+// Begin recording the user's recall of the current segment's first ayah. Fully
+// optional: any missing piece (mic, reference audio, memory) just declines.
+static void start_mic(void)
+{
+    const HifzSeg *s = hifz_drill_cur_seg();
+    if (!s) return;
+    int surah = hifz_drill_surah();
+    if (!s_rec) s_rec = malloc(REC_MAX_N * sizeof(int16_t));
+    if (!s_ref) s_ref = malloc(REF_MAX_N * sizeof(int16_t));
+    if (!s_rec || !s_ref) { toast("Out of memory"); return; }
+
+    // Reference recitation for the segment's first ayah (the scorer needs it).
+    player_load(&g_player, surah, s->a0);
+    s_ref_n = g_player.clip
+            ? hal_audio_read_pcm16(g_player.clip, 0, s_ref, REF_MAX_N, &s_ref_hz) : 0;
+    if (!s_ref_n) { toast("No reference audio here"); return; }
+    if (!hal_mic_start(MIC_HZ)) { toast("No microphone"); return; }
+
+    s_rec_n = 0;
+    va_init(&s_va, MIC_HZ);
+    hal_audio_click(true);
+    s_mic = MIC_REC;
+}
+
+// Score the take against the reference and SUGGEST a grade (never commit it).
+// Offline DTW's reliable signal is omission detection, so it only ever suggests
+// DOWNWARD — a clean-sounding take leaves the choice to the reader.
+static void analyze_and_suggest(void)
+{
+    hal_mic_stop();
+    s_mic = MIC_OFF;
+    s_suggest = -1;
+    s_suggest_msg = NULL;
+
+    const HifzSeg *s = hifz_drill_cur_seg();
+    int a0 = s ? s->a0 : 0;
+    if (!s_va.heard) { s_suggest_msg = "Didn't hear you"; goto assess; }
+
+    uint32_t a, b;
+    va_span(&s_va, s_rec_n, &a, &b);
+    int nw = timing_word_count(&g_player.timing, a0);
+    if (nw <= 0 || !s_ref_n || b <= a) {
+        s_suggest_msg = "Couldn't score - grade yourself";
+        goto assess;
+    }
+    if (nw > DRILL_MAX_WORDS) nw = DRILL_MAX_WORDS;
+    WordTiming wt[DRILL_MAX_WORDS];
+    for (int i = 0; i < nw; i++) timing_word(&g_player.timing, a0, i, &wt[i]);
+    ReciteWord rw[DRILL_MAX_WORDS];
+    if (!recite_analyze(s_ref, s_ref_n, s_ref_hz, s_rec + a, b - a, MIC_HZ,
+                        wt, nw, rw)) {
+        s_suggest_msg = "Couldn't align - grade yourself";
+        goto assess;
+    }
+
+    int missing = 0, bad = 0;
+    for (int i = 0; i < nw; i++) {
+        if (rw[i].verdict == RECITE_MISSING) missing++;
+        else if (rw[i].verdict == RECITE_MISMATCH) bad++;
+    }
+    if (missing >= (nw + 1) / 2) {
+        s_suggest = 2;  s_suggest_msg = "Heard gaps - suggested NO";
+    } else if (missing > 0 || bad >= (nw + 2) / 3) {
+        s_suggest = 1;  s_suggest_msg = "Some gaps - suggested SHAKY";
+    } else {
+        s_suggest = -1; s_suggest_msg = "No omissions heard - your call";
+    }
+
+assess:
+    if (s_suggest >= 0) s_grade_sel = s_suggest;   // move the cursor; user confirms
+    hifz_drill_skip(plat_millis());                // RECALL -> ASSESS
 }
 
 static void on_tick(uint32_t dt_ms)
 {
     (void)dt_ms;
+
+    // Mic recording/analysis pauses the drill (like the meaning sheet).
+    if (s_mic == MIC_REC) {
+        int got = hal_mic_read(s_rec + s_rec_n, (int)(REC_MAX_N - s_rec_n));
+        if (va_feed(&s_va, s_rec, REC_MAX_N, &s_rec_n, got) != VA_RUNNING)
+            s_mic = MIC_ANALYZE;
+        if (s_toast_ttl > 0) s_toast_ttl--;
+        return;
+    }
+    if (s_mic == MIC_ANALYZE) { analyze_and_suggest(); return; }
+
     // The meaning sheet pauses the drill — studying a word shouldn't burn the
     // recall clock or auto-advance the phase out from under the reader.
     if (!s_sheet) hifz_drill_tick(plat_millis());
@@ -333,10 +447,20 @@ static void on_render(Canvas *c)
     render_band(c, band_top, band_bot);
 
     int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 68;
-    if (s_sheet) {
+    if (s_mic == MIC_REC) {
+        font_draw_string_centered(c, iy, &font_medium, "RECORDING", THEME_BADGE);
+        font_draw_string_centered(c, iy + 20, &font_tiny,
+                                  s_va.heard ? "reciting... pause when done"
+                                             : "recite from memory", THEME_DIM);
+        theme_meter(c, 40, iy + 34, CANVAS_WIDTH - 80, 8, s_va.peak);
+    } else if (s_sheet) {
         render_sheet(c, iy - 8);
     } else if (ph == DRILL_ASSESS) {
         render_assess(c, iy - 44);
+        // A mic suggestion moves the cursor, never commits — say why it landed.
+        if (s_suggest_msg)
+            font_draw_string_centered(c, iy - 58, &font_tiny, s_suggest_msg,
+                                      THEME_ACCENT);
     } else {
         font_draw_string_centered(c, iy, &font_medium, phase_name(ph),
                                   ph == DRILL_LISTEN ? THEME_ACTIVE : THEME_TITLE);
@@ -353,13 +477,28 @@ static void on_render(Canvas *c)
         font_draw_string_centered(c, band_top + 4, &font_tiny, s_toast, THEME_BADGE);
 
     // Keybar per state.
-    if (s_sheet) {
+    if (s_mic == MIC_REC) {
+        KeyChip k[2] = {
+            { "OK", "DONE NOW", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
+            { "BK", "CANCEL", 1, { INPUT_BTN_BACK } },
+        };
+        theme_keybar(c, k, 2);
+    } else if (s_sheet) {
         KeyChip k[2] = {
             { "<>", "WORD", 4, { INPUT_NAV_LEFT, INPUT_NAV_RIGHT,
                                  INPUT_ENC_CW, INPUT_ENC_CCW } },
             { "MD", "CLOSE", 3, { INPUT_BTN_MODE, INPUT_NAV_SELECT, INPUT_BTN_BACK } },
         };
         theme_keybar(c, k, 2);
+    } else if (ph == DRILL_RECALL) {
+        KeyChip k[5] = {
+            { "OK", "DONE", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
+            { "^", "REC", 1, { INPUT_NAV_UP } },
+            { "v", "PEEK", 1, { INPUT_NAV_DOWN } },
+            { ">", "MEANING", 2, { INPUT_NAV_RIGHT, INPUT_BTN_MODE } },
+            { "BK", "STOP", 1, { INPUT_BTN_BACK } },
+        };
+        theme_keybar(c, k, 5);
     } else if (ph == DRILL_ASSESS) {
         KeyChip k[2] = {
             { "^v", "CHOOSE", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN,
@@ -390,6 +529,17 @@ static void on_input(InputEvent e)
 {
     uint32_t now = plat_millis();
     DrillPhase ph = hifz_drill_phase();
+
+    // While recording, the endpointer auto-stops; OK finishes early, BK cancels.
+    if (s_mic == MIC_REC) {
+        switch (e.type) {
+        case INPUT_NAV_SELECT:
+        case INPUT_ENC_PUSH: s_mic = MIC_ANALYZE; break;
+        case INPUT_BTN_BACK: hal_mic_stop(); s_mic = MIC_OFF; break;
+        default: break;
+        }
+        return;
+    }
 
     // Meaning sheet takes over input while open (the drill is paused).
     if (s_sheet) {
@@ -442,6 +592,10 @@ static void on_input(InputEvent e)
         break;
     case INPUT_NAV_DOWN:
         hifz_drill_peek(now);
+        break;
+    case INPUT_NAV_UP:
+        // Record my recall (RECALL only) — endpoints, scores, suggests a grade.
+        if (ph == DRILL_RECALL) start_mic();
         break;
     case INPUT_NAV_RIGHT:
     case INPUT_BTN_MODE:
