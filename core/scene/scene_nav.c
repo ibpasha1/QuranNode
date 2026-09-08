@@ -35,6 +35,26 @@ static InputAccel s_accel;   // hold-to-scroll ramp for the long lists
 // The bundled sample only has content for these surahs (extend as data grows).
 static bool content_available(int surah) { return surah == 1; }
 
+// --- "Resume or start over?" prompt for a partially-read surah -------------
+// Opening a surah you've already begun shouldn't silently restart it. When it's
+// partway read we ask; "resume" lands on the first ayah you haven't read yet
+// (or the exact global last-position when that surah is the one you left off in).
+static bool s_resume_prompt = false;
+static int  s_prompt_surah = 0;
+static int  s_prompt_ayah = 1;     // where "resume" jumps
+static int  s_prompt_sel = 0;      // 0 = resume, 1 = start over
+
+static int surah_resume_ayah(int surah)
+{
+    ResumePoint r = progress_resume();
+    if (progress_has_resume() && r.surah == surah && r.ayah >= 1)
+        return r.ayah;                          // exact spot you left off
+    int n = qdb_ayah_count(surah);
+    for (int a = 1; a <= n; a++)
+        if (!khatm_is_read(surah, a)) return a;  // first unread ayah
+    return 1;                                    // fully read -> start over
+}
+
 // Root launcher rows. Keep in sync with ROOT_ROWS in render_root() and enter().
 #define N_ROOT 6
 
@@ -176,9 +196,39 @@ static void render_root(Canvas *c)
     }
 }
 
+static void render_resume_prompt(Canvas *c)
+{
+    theme_header(c, "RESUME?", THEME_TITLE, NULL, THEME_DIM);
+    int pct = (int)(khatm_surah_frac(s_prompt_surah) * 100.f + 0.5f);
+    int y = CANVAS_HEIGHT / 2 - 46;
+    canvas_rect_fill(c, 20, y, CANVAS_WIDTH - 40, 92, THEME_PANEL);
+    canvas_rect(c, 20, y, CANVAS_WIDTH - 40, 92, THEME_ACCENT);
+
+    char l1[40];
+    snprintf(l1, sizeof l1, "%s  %d%%", qdb_surah_name(s_prompt_surah), pct);
+    font_draw_string_centered(c, y + 10, &font_small, l1, THEME_TEXT);
+
+    char opt0[28];
+    snprintf(opt0, sizeof opt0, "Resume  %d:%d", s_prompt_surah, s_prompt_ayah);
+    int oy0 = y + 40, oy1 = y + 62;
+    theme_sel_block(c, 28, (s_prompt_sel == 0 ? oy0 : oy1) - 3, CANVAS_WIDTH - 56, 15);
+    font_draw_string_centered(c, oy0, &font_tiny, opt0,
+                              s_prompt_sel == 0 ? THEME_SEL_TEXT : THEME_TEXT);
+    font_draw_string_centered(c, oy1, &font_tiny, "Start from beginning",
+                              s_prompt_sel == 1 ? THEME_SEL_TEXT : THEME_TEXT);
+
+    KeyChip chips[3] = {
+        { "^v", "CHOOSE", 2, { INPUT_NAV_UP, INPUT_NAV_DOWN } },
+        { "OK", "SELECT", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
+        { "BK", "CANCEL", 1, { INPUT_BTN_BACK } },
+    };
+    theme_keybar(c, chips, 3);
+}
+
 static void on_render(Canvas *c)
 {
     theme_clear(c);
+    if (s_resume_prompt) { render_resume_prompt(c); return; }
 
     int count = list_count();
     int sel = s_sel[s_mode], scroll = s_scroll[s_mode];
@@ -269,9 +319,21 @@ static void enter(void)
         default: scene_switch(SCENE_SETTINGS); return;
         }
         break;
-    case NAV_SURAH:
-        jump_to(sel + 1, 1);
+    case NAV_SURAH: {
+        int surah = sel + 1;
+        int ra = surah_resume_ayah(surah);
+        float frac = khatm_surah_frac(surah);
+        // Only ask when there's a distinct spot to resume to (partway read).
+        if (ra > 1 && frac > 0.005f && frac < 0.995f) {
+            s_resume_prompt = true;
+            s_prompt_surah = surah;
+            s_prompt_ayah = ra;
+            s_prompt_sel = 0;
+        } else {
+            jump_to(surah, 1);
+        }
         break;
+    }
     case NAV_JUZ: {
         QRef r = qdb_juz_start(sel + 1);
         jump_to(r.surah, r.ayah);
@@ -297,10 +359,27 @@ static void back(void)
     else s_mode = NAV_ROOT;
 }
 
-static void on_enter(void) { s_mode = NAV_ROOT; }
+static void on_enter(void) { s_mode = NAV_ROOT; s_resume_prompt = false; }
 
 static void on_input(InputEvent e)
 {
+    if (s_resume_prompt) {
+        switch (e.type) {
+        case INPUT_NAV_UP:   case INPUT_ENC_CCW: s_prompt_sel = 0; break;
+        case INPUT_NAV_DOWN: case INPUT_ENC_CW:  s_prompt_sel = 1; break;
+        case INPUT_NAV_SELECT:
+        case INPUT_ENC_PUSH: {
+            int ayah = s_prompt_sel == 0 ? s_prompt_ayah : 1;
+            s_resume_prompt = false;
+            jump_to(s_prompt_surah, ayah);
+            break;
+        }
+        case INPUT_BTN_BACK:
+        case INPUT_BTN_MENU: s_resume_prompt = false; break;
+        default: break;
+        }
+        return;
+    }
     switch (e.type) {
     case INPUT_NAV_UP:
     case INPUT_ENC_CCW:  move(-1); break;

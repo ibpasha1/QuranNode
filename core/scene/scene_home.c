@@ -100,11 +100,13 @@ static void on_render(Canvas *c)
 
     font_draw_string(c, hx + 12, hy + 10, &font_tiny, "CONTINUE READING",
                      THEME_LABEL);
-    // The badge is the whole-Quran figure, not the juz: how far through the
-    // mushaf you are is the number worth carrying on the home screen.
+    // The badge is this surah's completion — the same figure the surah list
+    // shows — so the number next to the surah name means what you'd expect.
+    // Whole-mushaf progress is carried by the "of 604 pages" foot below.
     const KhatmStats *k = khatm_stats();
+    float sfrac = khatm_surah_frac(r.surah);
     char badge[12];
-    snprintf(badge, sizeof(badge), "%d%%", (int)(k->percent + 0.5f));
+    snprintf(badge, sizeof(badge), "%d%%", (int)(sfrac * 100.f + 0.5f));
     font_draw_string_right(c, hx + hw - 12, hy + 10, &font_tiny, badge,
                            THEME_TITLE);
 
@@ -115,9 +117,9 @@ static void on_render(Canvas *c)
              r.ayah, ayat, juz, qdb_page_of(r.surah, r.ayah));
     font_draw_string_centered(c, hy + 52, &font_tiny, sub, THEME_DIM);
 
-    // Progress through the KHATM, not through the current surah — the bar now
-    // means the same thing as the badge above it.
-    canvas_progress_bar(c, hx + 14, hy + 66, hw - 28, 5, k->percent / 100.f,
+    // Bar tracks this surah, matching the badge above it; the foot below gives
+    // the whole-mushaf figure ("of 604 pages") so both views are still present.
+    canvas_progress_bar(c, hx + 14, hy + 66, hw - 28, 5, sfrac,
                         THEME_ACCENT, THEME_GRID);
 
     char foot[44];
