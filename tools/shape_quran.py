@@ -73,11 +73,18 @@ PREVIEW_PALETTE = {
 
 TAJWEED_DIR = os.path.join(os.path.dirname(__file__), "quran-tajweed")
 
+# Text + annotation sources. Overridden by --text-file / --annot-file so the
+# waqf-marked variant (tools/build_waqf_text.py) can be shaped without touching
+# the plain build. They must be a matched pair: the annotation offsets index
+# into the text codepoints.
+TEXT_PATH = os.path.join(TAJWEED_DIR, "quran-uthmani.txt")
+ANNOT_PATH = os.path.join(TAJWEED_DIR, "output", "tajweed.hafs.uthmani-pause-sajdah.json")
+
 
 def load_tanzil_surah(surah):
     """Return {ayah: text} for `surah` from the Tanzil Uthmani text the tajweed
     annotations were built against (so codepoint offsets line up)."""
-    path = os.path.join(TAJWEED_DIR, "quran-uthmani.txt")
+    path = TEXT_PATH
     out = {}
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -190,7 +197,7 @@ def load_color_maps(surah, ayah_texts):
     """Return {ayah: [palette_index per codepoint]} from the tajweed JSON,
     overlaid with computed tafkhim colours where the JSON leaves text uncolored."""
     import json
-    path = os.path.join(TAJWEED_DIR, "output", "tajweed.hafs.uthmani-pause-sajdah.json")
+    path = ANNOT_PATH
     data = json.load(open(path))
     maps = {}
     for e in data:
@@ -501,9 +508,17 @@ def main():
                     help="per-surah <n>.qgp files are written here")
     ap.add_argument("--tajweed", action="store_true", help="bake tajweed rule colors")
     ap.add_argument("--preview", metavar="DIR", help="also write per-ayah preview PNGs")
+    ap.add_argument("--text-file", help="override Uthmani text (e.g. quran-uthmani-waqf.txt)")
+    ap.add_argument("--annot-file", help="override tajweed annotations JSON (must match --text-file)")
     args = ap.parse_args()
 
-    have_tanzil = os.path.exists(os.path.join(TAJWEED_DIR, "quran-uthmani.txt"))
+    global TEXT_PATH, ANNOT_PATH
+    if args.text_file:
+        TEXT_PATH = args.text_file
+    if args.annot_file:
+        ANNOT_PATH = args.annot_file
+
+    have_tanzil = os.path.exists(TEXT_PATH)
     os.makedirs(args.outdir, exist_ok=True)
     surahs = _parse_surahs(args.surahs)
     print(f"font={args.font} px={args.px} maxw={args.maxw} tajweed={args.tajweed} "
