@@ -36,6 +36,14 @@ UA = {"User-Agent": "Mozilla/5.0 QuranNode/0.1"}
 # rosette (06DD), rub-el-hizb (06DE), or tatweel (0640).
 WAQF = set(range(0x06D6, 0x06DD)) | {0x06E9}
 
+END_OF_AYAH = "۝"   # ARABIC END OF AYAH — AmiriQuran renders it as a
+                         # rosette enclosing the (Arabic-Indic) digits after it.
+
+
+def ayah_marker(ayah):
+    """'۝' + the ayah number in Arabic-Indic digits (U+0660..0669)."""
+    return END_OF_AYAH + "".join(chr(0x0660 + int(d)) for d in str(ayah))
+
 
 def load_ours():
     out = {}
@@ -119,6 +127,10 @@ def main():
                 print(f"  !! {surah}:{ayah} space count changed — skipping marks")
                 aug, o2a = o, list(range(len(o) + 1))
             total_marks += len(aug) - len(o)
+            # Append the end-of-ayah rosette with NO leading space, so the word
+            # count (which drives recitation timing) is unchanged. It lands after
+            # every annotated letter, so the tajweed offsets above are untouched.
+            aug = aug + ayah_marker(ayah)
             text_lines.append(f"{surah}|{ayah}|{aug}")
 
             e = annot_by.get((surah, ayah))

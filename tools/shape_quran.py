@@ -279,11 +279,24 @@ class Shaper:
 
         byte2word, n_words = self._word_index_map(text)
 
+        # End-of-ayah enclosure fix: the rosette (U+06DD) encloses the ayah-number
+        # digits, which HarfBuzz emits as ZERO-advance glyphs *before* the rosette
+        # base, with an x_offset measured from the pen AFTER the rosette advances.
+        # Because the verse-end is the visual-leftmost thing, that leading run of
+        # zero-advance glyphs sits at the very start of the stream (a normal line
+        # starts with an advancing letter, so lead==0 and nothing changes). Shift
+        # that run right by the base's advance so the digits land inside the circle.
+        lead = 0
+        while lead < len(positions) and positions[lead].x_advance == 0:
+            lead += 1
+        lead_shift = positions[lead].x_advance if 0 < lead < len(positions) else 0
+
         # First pass: place each glyph, collect owning word + tajweed color.
         placed = []   # (gid, pen_x_px, pen_y_px, word_idx, color_idx)
         pen = 0.0
-        for info, pos in zip(infos, positions):
-            gx = (pen + pos.x_offset) * self.scale
+        for gi, (info, pos) in enumerate(zip(infos, positions)):
+            shift = lead_shift if gi < lead else 0
+            gx = (pen + pos.x_offset + shift) * self.scale
             gy = (pos.y_offset) * self.scale
             col = 0
             if line_colors and 0 <= info.cluster < len(line_colors):
