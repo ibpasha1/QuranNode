@@ -59,8 +59,11 @@ typedef struct { int8_t tier; int16_t portion; uint8_t overdue; } Row;
 static Row s_rows[1 + HIFZ_PLAN_MAX * 2];
 static int s_nrows;
 
-// Heat-map cell heights + weak list, rebuilt only when hifz state changes.
+// Heat-map cell heights + per-page weak flag + weak list, rebuilt only when
+// hifz state changes. s_map_weak mirrors hifz_page_has_weak() so render_map
+// doesn't re-scan every ayah on all 604 pages every frame (~6k byte checks).
 static uint8_t  s_map_h[QDB_PAGE_COUNT];
+static uint8_t  s_map_weak[QDB_PAGE_COUNT];
 static uint32_t s_map_seq = 0;
 static HifzWeakAyah s_weak[MAP_WEAK_MAX];
 static int s_nweak;
@@ -78,6 +81,7 @@ static void rebuild_map(void)
         int h = (int)(f * MAP_CELL + 0.5f);
         if (f > 0.f && h == 0) h = 1;
         s_map_h[p - 1] = (uint8_t)h;
+        s_map_weak[p - 1] = hifz_page_has_weak(p) ? 1 : 0;
     }
     s_nweak = hifz_weak_ayat(s_weak, MAP_WEAK_MAX);
     if (s_weak_sel >= s_nweak) s_weak_sel = s_nweak > 0 ? s_nweak - 1 : 0;
@@ -437,7 +441,7 @@ static void render_map(Canvas *c)
         if (h > 0)
             canvas_rect_fill(c, x, y + MAP_CELL - h, MAP_CELL, h,
                              h >= MAP_CELL ? THEME_ACTIVE : THEME_BAR);
-        if (hifz_page_has_weak(p))
+        if (s_map_weak[i])
             canvas_hline(c, x, y, MAP_CELL, THEME_BADGE);
     }
 

@@ -43,6 +43,7 @@ typedef struct {
     uint16_t ascent;
     uint32_t n_entries;
     uint8_t *index;         // owned: n_entries * 16-byte entries
+    bool index_sorted;      // entries non-decreasing by (surah,ayah) => binary search
     GpCacheSlot cache[GP_CACHE_N];
     uint32_t clock;
 } GlyphPack;

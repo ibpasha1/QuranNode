@@ -14,6 +14,12 @@ static inline uint32_t rd_u32(const uint8_t *p) {
     return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
 }
 
+// Composite sort key for one index entry: surah in the high half, ayah in the
+// low half, so ascending numeric order == mushaf order.
+static inline uint32_t entry_key(const uint8_t *e) {
+    return ((uint32_t)rd_u16(e) << 16) | rd_u16(e + 2);
+}
+
 bool glyphpack_open(GlyphPack *gp, const char *rel_path)
 {
     memset(gp, 0, sizeof(*gp));
@@ -43,6 +49,18 @@ bool glyphpack_open(GlyphPack *gp, const char *rel_path)
         free(gp->index); gp->index = NULL;
         hal_fs_close(gp->file); gp->file = NULL; return false;
     }
+    // The generator emits ayat in mushaf order, so the index is normally sorted
+    // by (surah,ayah) — verify once here so find_entry can binary-search. Any
+    // out-of-order entry (unexpected) just drops it back to the linear scan.
+    gp->index_sorted = true;
+    for (uint32_t i = 1; i < gp->n_entries; i++)
+        if (entry_key(gp->index + (size_t)i * IDX_STRIDE) <
+            entry_key(gp->index + (size_t)(i - 1) * IDX_STRIDE)) {
+            gp->index_sorted = false;
+            QN_LOGE(TAG, "pack index not sorted at %u; using linear lookup", (unsigned)i);
+            break;
+        }
+
     QN_LOGI(TAG, "pack %s: %u ayat, line_h=%u (streamed)", rel_path,
             (unsigned)gp->n_entries, gp->line_h);
     return true;
@@ -59,7 +77,19 @@ void glyphpack_close(GlyphPack *gp)
 
 static const uint8_t *find_entry(const GlyphPack *gp, int surah, int ayah)
 {
-    for (uint32_t i = 0; i < gp->n_entries; i++) {
+    uint32_t target = ((uint32_t)(uint16_t)surah << 16) | (uint16_t)ayah;
+    if (gp->index_sorted) {   // binary search the mushaf-ordered index
+        uint32_t lo = 0, hi = gp->n_entries;
+        while (lo < hi) {
+            uint32_t mid = lo + (hi - lo) / 2;
+            const uint8_t *e = gp->index + (size_t)mid * IDX_STRIDE;
+            uint32_t k = entry_key(e);
+            if (k == target) return e;
+            if (k < target) lo = mid + 1; else hi = mid;
+        }
+        return NULL;
+    }
+    for (uint32_t i = 0; i < gp->n_entries; i++) {   // fallback: linear scan
         const uint8_t *e = gp->index + (size_t)i * IDX_STRIDE;
         if (rd_u16(e) == surah && rd_u16(e + 2) == ayah) return e;
     }

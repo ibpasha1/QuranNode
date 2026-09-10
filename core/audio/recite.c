@@ -80,6 +80,14 @@ static uint8_t s_mel_bin[FFT_N / 2];
 static float   s_mel_w[FFT_N / 2];
 static bool    s_mel_ready;
 
+// Frame-invariant tables, built once alongside the mel bank. The Hann window
+// (512 cosf) and the DCT-II basis (N_MFCC*N_MEL cosf) are constant across every
+// frame, so extract_frame used to recompute ~750 cosf per frame — the single
+// biggest cost on the soft-float ESP32. Baking them here turns that into table
+// lookups. s_dct[c] is the basis row for cepstral coefficient c (1..N_MFCC).
+static float s_hann[FFT_N];
+static float s_dct[N_MFCC + 1][N_MEL];
+
 static void mel_init(void)
 {
     float mlo = mel_of(MEL_LO_HZ), mhi = mel_of(MEL_HI_HZ);
@@ -90,6 +98,11 @@ static void mel_init(void)
         s_mel_bin[b] = (uint8_t)m;
         s_mel_w[b] = m - (float)s_mel_bin[b];
     }
+    for (int k = 0; k < FFT_N; k++)
+        s_hann[k] = 0.5f - 0.5f * cosf(2.f * (float)M_PI * k / (FFT_N - 1));
+    for (int c = 1; c <= N_MFCC; c++)
+        for (int m = 0; m < N_MEL; m++)
+            s_dct[c][m] = cosf((float)M_PI * c * (m + 0.5f) / N_MEL);
     s_mel_ready = true;
 }
 
@@ -118,8 +131,7 @@ static void extract_frame(const int16_t *s, uint32_t flen, uint32_t hz,
     for (int k = 0; k < FFT_N; k++) {
         uint32_t j = (uint32_t)((uint64_t)(off16 + k) * hz / FEAT_HZ);
         if (j >= flen) j = flen - 1;
-        float w = 0.5f - 0.5f * cosf(2.f * (float)M_PI * k / (FFT_N - 1));
-        fx[2 * k] = (s[j] / 32768.f) * w;
+        fx[2 * k] = (s[j] / 32768.f) * s_hann[k];
         fx[2 * k + 1] = 0.f;
     }
     fft_c(fx, FFT_N);
@@ -138,7 +150,7 @@ static void extract_frame(const int16_t *s, uint32_t flen, uint32_t hz,
     for (int c = 1; c <= N_MFCC; c++) {   // DCT-II, c0 (level) dropped
         float acc = 0;
         for (int m = 0; m < N_MEL; m++)
-            acc += logmel[m] * cosf((float)M_PI * c * (m + 0.5f) / N_MEL);
+            acc += logmel[m] * s_dct[c][m];
         out->f[c] = acc;
     }
 }
@@ -325,11 +337,22 @@ bool recite_analyze(const int16_t *ref, uint32_t ref_n, uint32_t ref_hz,
     uint8_t *bp = malloc((size_t)rn * un_n);
     if (!cost || !bp) { free(cost); free(bp); free(ur); free(rf); return false; }
 #define C(i, j) cost[(i) * un_n + (j)]
-    for (int i = 0; i < rn * un_n; i++) cost[i] = INF;
+    // Only the Sakoe-Chiba band is ever visited, so INF-init just the band
+    // instead of the whole rn*un_n matrix (~8x fewer writes at DTW_BAND=30).
+    // Fused into the compute loop: when row i is computed it reads only rows
+    // i-1/i-2, already initialised on prior iterations. Those steps read one
+    // cell PAST the band on each side of row i's neighbours — {(1,2)} reads
+    // j-2 (left of row i-1), {(2,1)} reads j-1 in row i-2 out to its band's
+    // right edge + 1 — so seed [jlo-2, jhi+1]. Those border cells stay INF and
+    // stand in for the old full init's out-of-band INF wall; without them the
+    // reads would hit uninitialised malloc garbage and corrupt the alignment.
     for (int i = 0; i < rn; i++) {
         int jc = i;   // tempo-normalized: the diagonal is 1:1
         int jlo = jc - DTW_BAND < 0 ? 0 : jc - DTW_BAND;
         int jhi = jc + DTW_BAND >= un_n ? un_n - 1 : jc + DTW_BAND;
+        int i0 = jlo - 2 < 0 ? 0 : jlo - 2;
+        int i1 = jhi + 1 > un_n - 1 ? un_n - 1 : jhi + 1;
+        for (int j = i0; j <= i1; j++) C(i, j) = INF;
         for (int j = jlo; j <= jhi; j++) {
             float d = fdist(&rf[i], &ur[j]);
             if (i == 0 && j == 0) { C(0, 0) = d; bp[0] = 0; continue; }
