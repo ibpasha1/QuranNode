@@ -304,10 +304,16 @@ class Shaper:
             placed.append((info.codepoint, gx, gy, byte2word.get(info.cluster, -1), col))
             pen += pos.x_advance
 
-        # Rasterize glyphs to find real ink bounds (FreeType bitmaps).
+        # Rasterize glyphs to find real ink bounds (FreeType bitmaps), in BOTH
+        # axes. The horizontal bounds were always the real ink; the vertical
+        # used to be the font's metric line height, which CLIPPED marks whose
+        # ink rises above the ascender (shadda-stacks, superscript alif, high
+        # sukun) — dropping vowels, worse at large sizes. Track y too.
         glyph_bmps = []
         min_x = 1e9
         max_x = -1e9
+        min_y = 1e9
+        max_y = -1e9
         for gid, gx, gy, _w, _col in placed:
             self.ft.load_glyph(gid, freetype.FT_LOAD_RENDER)
             bm = self.ft.glyph.bitmap
@@ -316,17 +322,25 @@ class Shaper:
             ox = gx + left
             oy = self.ascent - top - gy
             glyph_bmps.append((ox, oy, bm.width, bm.rows, bytes(bm.buffer), bm.pitch))
-            if bm.width:
+            if bm.width and bm.rows:
                 min_x = min(min_x, ox)
                 max_x = max(max_x, ox + bm.width)
+                min_y = min(min_y, oy)
+                max_y = max(max_y, oy + bm.rows)
 
         if max_x < min_x:      # empty
             return b"", None, 0, 0, [(0, 0, 0, 0)] * n_words
 
         pad = 4
         origin_x = min_x - pad
+        # Always cover at least the metric line box [0, line_h] so ordinary
+        # lines are byte-for-byte identical to before; expand only when ink
+        # overshoots, so previously-clipped marks now fit.
+        top_y = min(min_y, 0.0)
+        bot_y = max(max_y, float(self.line_h))
+        origin_y = top_y - pad
         w = int(round(max_x - min_x)) + 2 * pad
-        h = self.line_h + 2 * pad
+        h = int(round(bot_y - top_y)) + 2 * pad
         alpha = bytearray(w * h)
         colidx = bytearray(w * h) if line_colors else None
 
@@ -334,7 +348,7 @@ class Shaper:
         word_bbox = {}
         for (ox, oy, gw, gh, buf_bytes, pitch), (_gid, _gx, _gy, word, col) in zip(glyph_bmps, placed):
             bx = int(round(ox - origin_x))
-            by = int(round(oy)) + pad
+            by = int(round(oy - origin_y))
             for row in range(gh):
                 dy = by + row
                 if dy < 0 or dy >= h:
