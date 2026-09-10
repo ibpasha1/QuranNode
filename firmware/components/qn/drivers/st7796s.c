@@ -161,25 +161,34 @@ esp_err_t st7796s_init(ST7796S *dev, spi_host_device_t host, int freq_hz,
         ESP_LOGE(TAG, "scale band buffer alloc failed — display will be blank");
     }
 
-    // Hardware reset
-    gpio_set_level(pin_rst, 0);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    gpio_set_level(pin_rst, 1);
+    // Power-on settle. On a COLD boot the panel's supply / internal charge
+    // pump isn't stable yet when this runs (display init is very early in
+    // boot), so the power/gamma/line-count config below sometimes fails to
+    // latch — the classic "renders ~90%, bottom strip cut off, cured by a
+    // warm reboot" (warm reboots keep the rail up). Let it stabilize first.
     vTaskDelay(pdMS_TO_TICKS(120));
+
+    // Hardware reset (RST low well past the 10us min, then >=120ms to wake).
+    gpio_set_level(pin_rst, 0);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    gpio_set_level(pin_rst, 1);
+    vTaskDelay(pdMS_TO_TICKS(150));
 
     // Software reset
     st7796s_cmd(dev, 0x01);
     vTaskDelay(pdMS_TO_TICKS(150));
 
-    // Sleep out
+    // Sleep out — the panel needs >=120ms to fully wake before it will
+    // reliably latch the config that follows; give it margin.
     st7796s_cmd(dev, 0x11);
-    vTaskDelay(pdMS_TO_TICKS(120));
+    vTaskDelay(pdMS_TO_TICKS(150));
 
     // --- ST7796S initialization sequence ---
     // Command Set Control: unlock the manufacturer "command 2" registers so the
     // power/gamma tuning below takes effect (0xC3 then 0x96 is the ST7796S key).
     st7796s_cmd_data(dev, 0xF0, (uint8_t[]){0xC3}, 1);
     st7796s_cmd_data(dev, 0xF0, (uint8_t[]){0x96}, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));   // let the unlock settle before writing cmd-2 regs
 
     // Memory Access Control: PORTRAIT (320 wide x 480 tall), BGR byte order.
     // The 4 portrait candidates (BGR bit 0x08 always set):
@@ -193,7 +202,11 @@ esp_err_t st7796s_init(ST7796S *dev, spi_host_device_t host, int freq_hz,
 
     // Display Inversion / Frame Rate / power (ST7796S recommended values)
     st7796s_cmd_data(dev, 0xB4, (uint8_t[]){0x01}, 1);            // 1-dot inversion
-    st7796s_cmd_data(dev, 0xB6, (uint8_t[]){0x80, 0x02, 0x3B}, 3); // display function ctrl
+    // Display function control — the 0x3B sets NL = 480 driving lines. If THIS
+    // is what fails to latch on a marginal cold boot, the panel scans fewer
+    // lines and the bottom strip goes dark; give it a moment to take.
+    st7796s_cmd_data(dev, 0xB6, (uint8_t[]){0x80, 0x02, 0x3B}, 3);
+    vTaskDelay(pdMS_TO_TICKS(10));
     st7796s_cmd_data(dev, 0xE8, (uint8_t[]){0x40, 0x8A, 0x00, 0x00,
                                             0x29, 0x19, 0xA5, 0x33}, 8);
     st7796s_cmd_data(dev, 0xC1, (uint8_t[]){0x06}, 1);            // power control 2
