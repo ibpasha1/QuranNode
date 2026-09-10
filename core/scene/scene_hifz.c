@@ -47,6 +47,7 @@ static int s_pick_kind;     // 0 = juz, 1 = surah
 static int s_pick_arg = 30;
 static int s_pick_rev = 1;
 static int s_pick_row;      // 0 kind, 1 which, 2 direction, 3 confirm
+static Mode s_pick_ret = VIEW;  // where BACK returns to (VIEW or MAP)
 
 #define LIST_TOP 132
 #define LIST_BOT 384
@@ -306,7 +307,7 @@ static void render_view(Canvas *c)
                                   "Press NEW to start today's portion", THEME_ACCENT);
     } else {
         font_draw_string_centered(c, sy, &font_tiny,
-                                  "Hold OK for your memorization map", THEME_DIM);
+                                  "Press > for your memorization map", THEME_DIM);
     }
 
     if (s_toast > 0 && s_toast_msg) {
@@ -322,7 +323,7 @@ static void render_view(Canvas *c)
                              INPUT_ENC_CW, INPUT_ENC_CCW } },
         { "OK", s_nrows ? "DRILL" : "NEW", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
         { "<",  s_nrows ? "GRADE" : "", s_nrows ? 1 : 0, { INPUT_NAV_LEFT } },
-        { ">",  "TARGET", 1, { INPUT_NAV_RIGHT } },
+        { ">",  "MAP", 1, { INPUT_NAV_RIGHT } },
         { "BK", "HOME", 1, { INPUT_BTN_BACK } },
     };
     theme_keybar(c, chips, 5);
@@ -476,13 +477,14 @@ static void render_map(Canvas *c)
         }
     }
 
-    KeyChip chips[3] = {
+    KeyChip chips[4] = {
         { "^v", "SPOT", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN,
                              INPUT_ENC_CW, INPUT_ENC_CCW } },
         { "OK", "DRILL", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
+        { ">",  "TARGET", 1, { INPUT_NAV_RIGHT } },
         { "BK", "BACK", 1, { INPUT_BTN_BACK } },
     };
-    theme_keybar(c, chips, 3);
+    theme_keybar(c, chips, 4);
 }
 
 static void on_render(Canvas *c)
@@ -554,6 +556,13 @@ static void on_input(InputEvent e)
                 }
             }
             break;
+        case INPUT_NAV_RIGHT:
+            // Change what you're memorizing — BACK returns here, not the plan.
+            hal_audio_click(true);
+            s_pick_row = 0;
+            s_pick_ret = MAP;
+            s_mode = PICK_TARGET;
+            break;
         case INPUT_BTN_BACK: s_mode = VIEW; break;
         default: break;
         }
@@ -598,7 +607,7 @@ static void on_input(InputEvent e)
         case INPUT_BTN_BACK:
             // Refuse to leave with no target — there'd be nothing to show.
             if (hifz_scope().kind == HZ_SCOPE_NONE) scene_switch(SCENE_HOME);
-            else s_mode = VIEW;
+            else s_mode = s_pick_ret;
             break;
         default: break;
         }
@@ -640,16 +649,13 @@ static void on_input(InputEvent e)
             s_mode = GRADE;
         }
         break;
-    case INPUT_NAV_SELECT_LONG:
-        // Hold OK for the memorization heat map + weak spots.
+    case INPUT_NAV_RIGHT:
+        // Flip to the memorization heat map + weak spots (TARGET picker lives
+        // one level in, on the map's own '>').
         hal_audio_click(true);
         s_weak_sel = 0;
         s_map_seq = 0;   // force a rebuild
         s_mode = MAP;
-        break;
-    case INPUT_NAV_RIGHT:
-        s_pick_row = 0;
-        s_mode = PICK_TARGET;
         break;
     case INPUT_BTN_BACK:
     case INPUT_BTN_MENU:

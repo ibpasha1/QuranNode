@@ -75,6 +75,12 @@ void   hal_audio_pause(HalAudioClip *clip);
 bool   hal_audio_is_playing(HalAudioClip *clip);
 uint32_t hal_audio_pos_ms(HalAudioClip *clip);        // current playhead
 uint32_t hal_audio_len_ms(HalAudioClip *clip);        // total duration
+// Output latency: how far pos_ms LEADS the sound actually leaving the speaker,
+// i.e. the depth of the buffer between "handed to the output" and "audible"
+// (SDL device buffer in the sim, I2S DMA on device). Subtract it from pos_ms
+// before a word-highlight lookup so the highlight tracks what's heard, not
+// what's queued. 0 if unknown/irrelevant.
+uint32_t hal_audio_latency_ms(HalAudioClip *clip);
 void   hal_audio_seek_ms(HalAudioClip *clip, uint32_t ms);
 void   hal_audio_set_rate(HalAudioClip *clip, float rate);  // 1.0 = normal, 0.85 = slower
 void   hal_audio_set_volume(float vol);               // gain multiplier (1.0 = unity)

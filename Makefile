@@ -89,6 +89,13 @@ vad-test:
 	      -o quran-vad-test -lm
 	./quran-vad-test
 
+# Live score-follower: streaming online alignment, per-word verdicts, and the
+# mid-ayah restart/redo detector, over synthetic tone "words" (no SDL/mic).
+recite-live-test:
+	$(CC) -std=c11 -O2 $(INCLUDES) tools/recite_live_test.c core/audio/recite.c \
+	      -o quran-recite-live-test -lm
+	./quran-recite-live-test
+
 # Host-side batch evaluator: replay labeled training WAVs (from the teacher's
 # TRAIN mode) through recite_analyze against the real reference + timings.
 recite-eval:

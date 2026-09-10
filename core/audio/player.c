@@ -174,8 +174,15 @@ void player_update(Player *p)
 
     uint32_t pos = hal_audio_pos_ms(p->clip);
     if (pos > p->played_max_ms) p->played_max_ms = pos;
-    if (p->timing_ok)
-        p->active_word = timing_active_word(&p->timing, p->ayah, pos);
+    if (p->timing_ok) {
+        // pos_ms leads the sound actually leaving the speaker by the output
+        // buffer depth (SDL device buffer / I2S DMA). Roll the highlight back
+        // by that latency so it tracks what's HEARD, not what's queued —
+        // otherwise the word lights up slightly before the reciter says it.
+        uint32_t lat = hal_audio_latency_ms(p->clip);
+        uint32_t hpos = pos > lat ? pos - lat : 0;
+        p->active_word = timing_active_word(&p->timing, p->ayah, hpos);
+    }
 
     // End-of-clip: we intended to play, but it stopped on its own.
     if (p->playing && !hal_audio_is_playing(p->clip)) {

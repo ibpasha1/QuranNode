@@ -97,6 +97,7 @@ void hal_audio_pause(HalAudioClip *c){ (void)c; s_aud_playing = false; }
 bool hal_audio_is_playing(HalAudioClip *c){ (void)c; return s_aud_playing; }
 uint32_t hal_audio_pos_ms(HalAudioClip *c){ (void)c; return (uint32_t)s_aud_pos; }
 uint32_t hal_audio_len_ms(HalAudioClip *c){ (void)c; return S_AUD_LEN; }
+uint32_t hal_audio_latency_ms(HalAudioClip *c){ (void)c; return 0; }
 void hal_audio_seek_ms(HalAudioClip *c, uint32_t m){ (void)c; s_aud_pos = m; }
 void hal_audio_set_rate(HalAudioClip *c, float r){ (void)c; s_aud_rate = r; }
 void hal_audio_set_volume(float v){ (void)v; }

@@ -35,10 +35,10 @@
 #define MAX_WORDS     64
 
 typedef enum {
-    TEA_READY,      // ayah loaded; prompt to listen
+    TEA_READY,      // ayah loaded; prompt to start
+    TEA_PICK,       // choose surah + ayah range for the read-along
     TEA_LISTEN,     // teacher playing the ayah
-    TEA_RECITE,     // mic open, user reciting (practice OR training capture)
-    TEA_ANALYZE,    // one-tick analysis pass
+    TEA_RECITE,     // mic open, user reciting (live verdicts settle here)
     TEA_REVIEW,     // per-word verdicts on the Arabic; word nav + playback
     TEA_TRAIN,      // training-capture prompt (label + take number)
     TEA_NO_MIC,     // platform has no microphone
@@ -113,6 +113,33 @@ static float s_level;           // live mic level 0..1 (recite view meter)
 static VoiceActivity s_va;
 static uint32_t s_rec_off_ms;     // trim offset (maps analysis times -> s_rec)
 static const char *s_ready_hint;  // one-shot status line on the READY view
+static float s_listen_scroll;     // karaoke follow-scroll for a tall ayah in LISTEN
+
+// Live score-follower: streams the take AS it's recited and lights each word
+// green/amber/red a beat behind the reciter (no separate analyze pass). Armed
+// lazily on the first recite of an ayah so plain ^v nav stays snappy.
+static ReciteLive *s_live;
+static int s_live_ayah = -1;      // surah*1000+ayah the follower is armed for
+
+// Read-along trade-off session: the reciter and the user take turns through a
+// range of ayat. REPEAT = user echoes each ayah the reciter just read; TAKE-
+// TURNS = they alternate ayat. `s_run` is set while a session is in progress.
+enum { STYLE_REPEAT = 0, STYLE_TURNS = 1 };
+static int  s_style = STYLE_REPEAT;
+static int  s_range_end = 1;      // last ayah of the current session
+static bool s_run;                // a trade-off session is active
+
+// Turn size: each turn covers one ayah, or a whole mushaf page (several ayat
+// read in a row before handing off). s_turn_start/end are the current turn's
+// ayah span.
+enum { UNIT_AYAH = 0, UNIT_PAGE = 1 };
+static int  s_unit = UNIT_AYAH;
+static int  s_turn_start = 1, s_turn_end = 1;
+static uint32_t s_feed_base;      // page read-through: follower feeds s_rec from here
+
+// In-mode picker: choose surah + [from..to] (+ turn size) to read, instead of
+// inheriting the global Quran resume point.
+static int s_pick_surah = 1, s_pick_from = 1, s_pick_to = 1, s_pick_row;
 
 static void load_ayah(int surah, int ayah)
 {
@@ -121,6 +148,8 @@ static void load_ayah(int surah, int ayah)
     hal_pcm_stop();
     s_surah = surah; s_ayah = ayah;
     s_rec_n = 0; s_ref_n = 0; s_nwords = 0; s_sel_word = 0; s_seg_stop_ms = 0;
+    s_listen_scroll = 0;
+    s_live_ayah = -1;   // re-arm the follower on the next recite of this ayah
 
     // Per-surah glyph pack: (re)load when the surah changes.
     if (!s_pack_ok || s_pack_surah != surah) {
@@ -147,9 +176,15 @@ static void on_enter(void)
     // header in place (single-buffer hal_state_save).
     if (!s_rec) s_rec = malloc(REC_MAX_N * sizeof(int16_t) + 64);
     if (!s_ref) s_ref = malloc(REF_MAX_N * sizeof(int16_t));
+    if (!s_live) s_live = recite_live_create();
     ResumePoint r = progress_has_resume() ? progress_resume()
                                           : (ResumePoint){ 1, 1, 1.0f };
     load_ayah(r.surah, r.ayah);
+    s_range_end = qdb_ayah_count(s_surah);   // default: from here to end of surah
+    // Open the picker first — choosing surah/range is the front door of Recite.
+    s_pick_surah = s_surah; s_pick_from = s_ayah;
+    s_pick_to = qdb_ayah_count(s_surah); s_pick_row = 0;
+    if (s_state != TEA_NO_DATA) s_state = TEA_PICK;
 }
 
 static void on_leave(void)
@@ -168,6 +203,7 @@ static void on_leave(void)
     s_share = false;
     if (s_clip) { hal_audio_close(s_clip); s_clip = NULL; }
     if (s_timing_ok) { timing_close(&s_timing); s_timing_ok = false; }
+    recite_live_destroy(s_live); s_live = NULL; s_live_ayah = -1;
     // Keep s_rec/s_ref/pack resident: re-entry is common, sim/PSRAM have room.
 }
 
@@ -175,18 +211,43 @@ static void start_listen(void)
 {
     hal_pcm_stop();
     s_seg_stop_ms = 0;
+    s_listen_scroll = 0;
     hal_audio_seek_ms(s_clip, 0);
     hal_audio_set_rate(s_clip, 1.0f);
     hal_audio_play(s_clip);
     s_state = TEA_LISTEN;
 }
 
+// Arm the live follower for the current ayah (extract the reference features
+// once; a re-record of the same ayah just resets). Practice mode only.
+static void arm_live(void)
+{
+    if (!s_live || s_train >= 0) return;
+    int key = s_surah * 1000 + s_ayah;
+    if (s_live_ayah == key) { recite_live_reset(s_live); return; }
+    if (s_ref_n == 0)
+        s_ref_n = hal_audio_read_pcm16(s_clip, 0, s_ref, REF_MAX_N, &s_ref_hz);
+    s_nwords = timing_word_count(&s_timing, s_ayah);
+    if (s_nwords > MAX_WORDS) s_nwords = MAX_WORDS;
+    WordTiming wt[MAX_WORDS];
+    for (int i = 0; i < s_nwords; i++) timing_word(&s_timing, s_ayah, i, &wt[i]);
+    if (s_ref_n && recite_live_begin(s_live, s_ref, s_ref_n, s_ref_hz, wt, s_nwords))
+        s_live_ayah = key;
+}
+
 static void start_recite(void)
 {
     hal_audio_pause(s_clip);
+    // Reserve the mic's I2S DMA FIRST. On the ESP32 that DMA must live in
+    // internal RAM, and arming the follower beforehand (reference decode + its
+    // feature buffers) can starve it, failing i2s_new_channel -> "No mic".
     if (!hal_mic_start(MIC_HZ)) { s_state = TEA_NO_MIC; return; }
+    arm_live();   // now safe to extract ref features (mic buffers meanwhile)
+    if (s_live) recite_live_set_follow(s_live, true);   // reading-aid tracker
     s_rec_n = 0;
+    s_feed_base = 0;
     s_level = 0;
+    s_listen_scroll = 0;
     va_init(&s_va, MIC_HZ);
     s_ready_hint = NULL;
     hal_audio_click(true);   // audible "your turn" cue
@@ -263,6 +324,38 @@ static void share_takes(void)
     s_share = true;
 }
 
+// Last ayah of the turn that starts at `from`: itself for ayah-turns, or the
+// last ayah still on the same mushaf page (clamped to the session end).
+static int compute_turn_end(int from)
+{
+    if (s_unit == UNIT_AYAH || from >= s_range_end) return from;
+    int page = qdb_page_of(s_surah, from), e = from;
+    while (e < s_range_end && qdb_page_of(s_surah, e + 1) == page) e++;
+    return e;
+}
+
+static void end_session(const char *hint)
+{
+    s_run = false;
+    hal_mic_stop();
+    hal_audio_pause(s_clip);
+    s_ready_hint = hint;
+    s_state = TEA_READY;
+}
+
+// Begin a turn at ayah `from`; reciter=true => the reciter reads it (LISTEN),
+// false => your turn (RECITE). Past the range end -> the session is done.
+static void begin_turn(int from, bool reciter)
+{
+    if (from > s_range_end) { end_session("Finished - masha'Allah"); return; }
+    if (from != s_ayah || s_state == TEA_NO_DATA) load_ayah(s_surah, from);
+    if (s_state == TEA_NO_DATA) { end_session("No audio for that range"); return; }
+    s_turn_start = from;
+    s_turn_end = compute_turn_end(from);
+    if (reciter) start_listen();
+    else         start_recite();
+}
+
 static void finish_recite(void)
 {
     hal_mic_stop();
@@ -272,106 +365,15 @@ static void finish_recite(void)
         return;
     }
     if (s_train >= 0) { train_save_take(); return; }
-    s_state = TEA_ANALYZE;   // next tick runs the analysis
-}
-
-static void run_analysis(void)
-{
-    s_nwords = timing_word_count(&s_timing, s_ayah);
-    if (s_nwords > MAX_WORDS) s_nwords = MAX_WORDS;
-
-    // Pull the reference PCM once per ayah (cached until the ayah changes).
-    if (s_ref_n == 0)
-        s_ref_n = hal_audio_read_pcm16(s_clip, 0, s_ref, REF_MAX_N, &s_ref_hz);
-
-    WordTiming wt[MAX_WORDS];
-    for (int i = 0; i < s_nwords; i++)
-        timing_word(&s_timing, s_ayah, i, &wt[i]);
-
-    // Analyze only the voiced span (plus a little tail) — leading silence
-    // otherwise aligns to the first words and marks them "not heard".
-    uint32_t a, b;
-    va_span(&s_va, s_rec_n, &a, &b);
-    s_rec_off_ms = a * 1000u / MIC_HZ;
-
-    // Coverage gate: a grunt (a syllable or two) can't be graded word-by-
-    // word. ABSOLUTE floor only — field data shows fluent recitation runs
-    // 2.5-3.5x faster than the murattal reference (a full sincere take can
-    // be 1.2s of voice), so any ratio-based gate rejects honest takes; the
-    // tempo-normalized aligner handles pace, and real grunts are <0.9s.
-    {
-        uint32_t voiced_ms = (s_va.voice_b - s_va.voice_a) / (MIC_HZ / 1000);
-        if (voiced_ms < 900) {
-            QN_LOGI("TEACHER", "too short: voiced=%ums — not grading", voiced_ms);
-            s_ready_hint = "Too short - recite the whole ayah";
-            s_state = TEA_READY;
-            return;
-        }
-    }
-
-    bool ok = s_ref_n && b > a &&
-              recite_analyze(s_ref, s_ref_n, s_ref_hz,
-                             s_rec + a, b - a, MIC_HZ,
-                             wt, s_nwords, s_words);
-    if (!ok)
-        for (int i = 0; i < s_nwords; i++)
-            s_words[i] = (ReciteWord){ RECITE_MISSING, 99.f, 0, 0 };
-
-    // V2: ask the scoring server for word-level verdicts (it transcribes the
-    // take and compares words to the canonical text — content, not acoustics;
-    // docs/TEACHER_V2.md). On success its verdicts REPLACE the local ones;
-    // the local spans are kept for per-word replay until the server sends
-    // timestamps (M3). Offline / no server -> the local verdicts stand.
-    s_online = false;
-    if (b > a) {
-        uint32_t pcm_bytes = (b - a) * sizeof(int16_t);
-        uint8_t *wav = malloc(44 + pcm_bytes);
-        if (wav) {
-            va_wav_header(wav, pcm_bytes, MIC_HZ);
-            memcpy(wav + 44, s_rec + a, pcm_bytes);
-            RemoteWord rw[MAX_WORDS];
-            int rn = hal_score_remote(wav, 44 + pcm_bytes, s_surah, s_ayah,
-                                      rw, MAX_WORDS);
-            free(wav);
-            if (rn == s_nwords) {
-                for (int i = 0; i < s_nwords; i++) {
-                    s_words[i].verdict = (ReciteVerdict)rw[i].verdict;
-                    s_words[i].score = 1.f - rw[i].score;   // similarity -> distance-ish
-                    if (rw[i].end_ms > rw[i].start_ms) {
-                        s_words[i].user_start_ms = rw[i].start_ms;
-                        s_words[i].user_end_ms = rw[i].end_ms;
-                    }
-                }
-                s_online = true;
-            }
-        }
-    }
-
-    QN_LOGI("TEACHER", "analyze %d:%d ok=%d ref=%ums@%u take=%ums (rec=%ums voiced=[%u..%u]ms)",
-            s_surah, s_ayah, ok, s_ref_hz ? s_ref_n / (s_ref_hz / 1000) : 0, s_ref_hz,
-            (b - a) / (MIC_HZ / 1000), s_rec_n / (MIC_HZ / 1000),
-            s_va.voice_a / (MIC_HZ / 1000), s_va.voice_b / (MIC_HZ / 1000));
-    for (int i = 0; i < s_nwords; i++)
-        QN_LOGI("TEACHER", "  word %d: verdict=%d score=%.2f user=[%u..%u]ms",
-                i, s_words[i].verdict, s_words[i].score,
-                s_words[i].user_start_ms, s_words[i].user_end_ms);
-
-    // If NOTHING aligned (slope-limited DTW found no valid path — take too
-    // warped/short/mangled to judge), don't show a review of gray marks.
-    int unclear = 0;
-    for (int i = 0; i < s_nwords; i++)
-        if (s_words[i].verdict == RECITE_UNCLEAR) unclear++;
-    if (unclear == s_nwords && s_nwords > 0) {
-        s_ready_hint = "Couldn't align - recite the whole ayah";
-        s_state = TEA_READY;
+    if (s_run) {
+        // Still ayat left in YOUR turn (page turns span several)? recite on.
+        if (s_ayah < s_turn_end) { load_ayah(s_surah, s_ayah + 1); start_recite(); return; }
+        // Your turn done -> the reciter takes the next turn (both styles).
+        begin_turn(s_turn_end + 1, true);
         return;
     }
-
-    // Jump the review cursor to the first word needing attention.
-    s_sel_word = 0;
-    for (int i = 0; i < s_nwords; i++)
-        if (s_words[i].verdict != RECITE_GOOD) { s_sel_word = i; break; }
-    s_state = TEA_REVIEW;
+    s_ready_hint = "Recited - go again or pick another ayah";
+    s_state = TEA_READY;
 }
 
 // Play the teacher's audio for just the selected word.
@@ -399,12 +401,41 @@ static void play_user_word(void)
     hal_pcm_play(s_rec + a, b - a, MIC_HZ);
 }
 
+// Advance to the next ayah of a PAGE turn WITHOUT stopping the mic or clicking
+// — a continuous read-through. The recording keeps running; the new ayah's
+// follower consumes audio from here on (s_feed_base).
+static void seamless_next_ayah(void)
+{
+    s_ayah++;
+    if (s_clip) { hal_audio_close(s_clip); s_clip = NULL; }
+    char path[64];
+    snprintf(path, sizeof(path), "audio/%s/%d/%d.mp3", "abdulbasit", s_surah, s_ayah);
+    s_clip = hal_audio_open(path);
+    s_ref_n = 0;            // re-read the reference PCM for the new ayah
+    s_live_ayah = -1;
+    arm_live();             // begin the follower on the new ayah (same surah pack/timing)
+    if (s_live) recite_live_set_follow(s_live, true);
+    s_listen_scroll = 0;
+    s_feed_base = s_rec_n;  // the new ayah's follower feeds from here on
+}
+
 static void on_tick(uint32_t dt_ms)
 {
     (void)dt_ms;
     switch (s_state) {
     case TEA_LISTEN:
-        if (!hal_audio_is_playing(s_clip)) start_recite();
+        if (!hal_audio_is_playing(s_clip)) {
+            if (s_run) {
+                // Still ayat left in the reciter's turn (page turns)? play on.
+                if (s_ayah < s_turn_end) { load_ayah(s_surah, s_ayah + 1); start_listen(); break; }
+                // Reciter's turn done: REPEAT -> you echo the SAME turn;
+                // TAKE-TURNS -> you do the NEXT turn.
+                if (s_style == STYLE_REPEAT) begin_turn(s_turn_start, false);
+                else                         begin_turn(s_turn_end + 1, false);
+                break;
+            }
+            start_recite();
+        }
         break;
     case TEA_RECITE: {
         int got = hal_mic_read(s_rec + s_rec_n, (int)(REC_MAX_N - s_rec_n));
@@ -416,12 +447,25 @@ static void on_tick(uint32_t dt_ms)
             float lv = s_va.peak;
             s_level = lv > s_level ? lv : s_level * 0.85f;
         }
+        // Stream the voiced span into the follower so words light up live.
+        // Bounded to the voiced end (+tailpad) so trailing silence doesn't get
+        // charged to the last word as "missing".
+        if (s_live && s_train < 0 && s_live_ayah == s_surah * 1000 + s_ayah) {
+            uint32_t a, b;
+            va_span(&s_va, s_rec_n, &a, &b);
+            if (b > s_feed_base)
+                recite_live_feed(s_live, s_rec + s_feed_base, b - s_feed_base, MIC_HZ);
+            // Seamless page read-through: when the cursor finishes this ayah and
+            // the turn has more ayat, glide to the next with no pause / re-click.
+            if (s_run && s_ayah < s_turn_end && s_nwords > 0 &&
+                recite_live_cursor_word(s_live) >= s_nwords - 1 &&
+                (s_rec_n - s_feed_base) > (uint32_t)(MIC_HZ / 2)) {
+                seamless_next_ayah();
+            }
+        }
         if (r != VA_RUNNING) finish_recite();
         break;
     }
-    case TEA_ANALYZE:
-        run_analysis();
-        break;
     case TEA_REVIEW:
         // Stop teacher playback at the end of the selected word's segment.
         if (s_seg_stop_ms && hal_audio_is_playing(s_clip) &&
@@ -455,8 +499,35 @@ static const char *verdict_text(ReciteVerdict v)
     }
 }
 
-// Draw the ayah centered in the band; in review, underline each word in its
-// verdict color and box the selected word.
+// Ayah 1 of every surah but 1 (which IS the basmala) and 9 (which has none) is
+// drawn with a leading 4-word "Bismillah…" that the reciter's timing/audio do
+// not carry (the clip starts at the ayah's own first word).
+#define BASMALA_WORDS 4
+
+// Map a reciter timing-word index onto the DRAWN glyph words — mirrors the
+// reader's hl_word(). Without this the marks land on the basmala while the
+// audio recites the actual ayah (Al-Masad: text shows Bismillah, audio doesn't).
+// Returns -1 when there's nothing to place.
+static int tea_glyph_of(int tw_idx)
+{
+    if (tw_idx < 0) return -1;
+    int tw = timing_word_count(&s_timing, s_ayah);
+    if (tw <= 0) return -1;
+    if (qdb_words_agree(s_surah, s_ayah, tw)) return tw_idx;   // line up 1:1
+    int dw = qdb_word_count(s_surah, s_ayah);
+    if (dw <= 0) return -1;
+    // Ayah 1 carries the basmala prefix the timing lacks: skip past it.
+    if (s_ayah == 1 && s_surah != 1 && s_surah != 9 && dw == tw + BASMALA_WORDS)
+        return tw_idx + BASMALA_WORDS;
+    // Splits disagree some other way: sweep proportionally so it still tracks.
+    int mapped = (int)(((float)tw_idx + 0.5f) * (float)dw / (float)tw);
+    if (mapped < 0) mapped = 0;
+    if (mapped >= dw) mapped = dw - 1;
+    return mapped;
+}
+
+// Draw the ayah centered in the band; in review, underline each recited word in
+// its verdict color and box the selected word (timing words mapped to glyphs).
 static int draw_ayah_marked(Canvas *c, int band_top, int band_bot, bool marked)
 {
     AyahGlyphs g;
@@ -465,17 +536,17 @@ static int draw_ayah_marked(Canvas *c, int band_top, int band_bot, bool marked)
     if (top < band_top) top = band_top;
     int x = (CANVAS_WIDTH - g.w) / 2;
     arabic_draw_ayah(c, x, top, &g, THEME_TEXT,
-                     marked ? s_sel_word : -1, THEME_PLAYHEAD);
+                     marked ? tea_glyph_of(s_sel_word) : -1, THEME_PLAYHEAD);
     if (marked) {
-        int n = g.n_words < s_nwords ? g.n_words : s_nwords;
-        for (int i = 0; i < n; i++) {
+        for (int w = 0; w < s_nwords; w++) {
+            int gi = tea_glyph_of(w);
             AtWordBox b;
-            if (!ayah_word_box(&g, i, &b)) continue;
+            if (gi < 0 || gi >= g.n_words || !ayah_word_box(&g, gi, &b)) continue;
             int uy = top + b.y + b.h + 2;
             if (uy > band_bot - 2) uy = band_bot - 2;
             canvas_rect_fill(c, x + b.x, uy, b.w, 3,
-                             verdict_color(s_words[i].verdict));
-            if (i == s_sel_word)
+                             verdict_color(s_words[w].verdict));
+            if (w == s_sel_word)
                 canvas_rect(c, x + b.x - 2, top + b.y - 2, b.w + 4, b.h + 8,
                             THEME_ACCENT);
         }
@@ -483,12 +554,85 @@ static int draw_ayah_marked(Canvas *c, int band_top, int band_bot, bool marked)
     return top;
 }
 
+// Opaque status band below `band_bot`: masks any overflow of a tall ayah and
+// gives the bottom prompt a clean backdrop. REVIEW paints its own richer panel.
+static void draw_status_band(Canvas *c, int band_bot)
+{
+    int h = (CANVAS_HEIGHT - THEME_KEYBAR_H) - band_bot;
+    canvas_rect_fill(c, 0, band_bot, CANVAS_WIDTH, h, THEME_PANEL);
+    canvas_hline(c, 0, band_bot, CANVAS_WIDTH, THEME_GRID);
+}
+
+// Colour the words already passed (0..hl) with a "read" underline so progress
+// is visible in the read-along — position/coverage, NOT accuracy grading. Bars
+// outside the band are skipped (the header/status band cover the overflow).
+static void draw_read_progress(Canvas *c, int x, int top, const AyahGlyphs *g,
+                               int hl, int band_top, int band_bot)
+{
+    if (hl < 0) return;
+    int n = hl < g->n_words ? hl : g->n_words - 1;
+    for (int i = 0; i <= n; i++) {
+        AtWordBox b;
+        if (!ayah_word_box(g, i, &b)) continue;
+        int uy = top + b.y + b.h + 2;
+        if (uy < band_top || uy > band_bot - 2) continue;
+        canvas_rect_fill(c, x + b.x, uy, b.w, 3, THEME_ACTIVE);
+    }
+}
+
+// LISTEN/READY/RECITE view of the ayah: box the current word (hl, -1 = none),
+// trail a green "read so far" underline behind it, and — when the ayah is taller
+// than the band — glide a karaoke follow-scroll keeping that word ~42% down.
+static void draw_ayah_listen(Canvas *c, int band_top, int band_bot, int hl, bool playing)
+{
+    AyahGlyphs g;
+    if (!s_pack_ok || !glyphpack_get(&s_pack, s_surah, s_ayah, &g)) return;
+    int view_h = band_bot - band_top;
+    int x = (CANVAS_WIDTH - g.w) / 2;
+
+    if (g.h <= view_h) {                 // fits: center, no scroll
+        s_listen_scroll = 0;
+        int top = band_top + (view_h - g.h) / 2;
+        arabic_draw_ayah(c, x, top, &g, THEME_TEXT, hl, THEME_PLAYHEAD);
+        draw_read_progress(c, x, top, &g, hl, band_top, band_bot);
+        return;
+    }
+
+    // Taller than the band: follow the recited word, eased.
+    int max_scroll = g.h - view_h;
+    int target = (int)s_listen_scroll;   // hold between words / at ayah end
+    AtWordBox b;
+    if (playing && hl >= 0 && ayah_word_box(&g, hl, &b))
+        target = (b.y + b.h / 2) - (int)(view_h * 0.42f);
+    if (target < 0) target = 0;
+    if (target > max_scroll) target = max_scroll;
+    float d = (float)target - s_listen_scroll; if (d < 0) d = -d;
+    if (d < 0.75f) s_listen_scroll = (float)target;
+    else           s_listen_scroll += ((float)target - s_listen_scroll) * 0.25f;
+
+    int top = band_top - (int)(s_listen_scroll + 0.5f);
+    arabic_draw_ayah(c, x, top, &g, THEME_TEXT, hl, THEME_PLAYHEAD);
+    draw_read_progress(c, x, top, &g, hl, band_top, band_bot);
+
+    // Repaint the header over glyphs that scrolled up under it.
+    canvas_rect_fill(c, 0, 0, CANVAS_WIDTH, band_top, THEME_BG);
+    char ref[24];
+    snprintf(ref, sizeof ref, "%d:%d", s_surah, s_ayah);
+    theme_header(c, "RECITE", THEME_TITLE, ref, THEME_LABEL);
+
+    // Slim scrollbar: how far through the ayah we are.
+    int thumb_h = view_h * view_h / g.h; if (thumb_h < 12) thumb_h = 12;
+    int thumb_y = band_top + (int)((view_h - thumb_h) * (s_listen_scroll / (float)max_scroll));
+    canvas_rect_fill(c, CANVAS_WIDTH - 3, band_top, 2, view_h, THEME_GRID);
+    canvas_rect_fill(c, CANVAS_WIDTH - 3, thumb_y, 2, thumb_h, THEME_ACCENT);
+}
+
 static void on_render(Canvas *c)
 {
     theme_clear(c);
     char ref[24];
     snprintf(ref, sizeof(ref), "%d:%d", s_surah, s_ayah);
-    theme_header(c, "QURAN TEACHER", THEME_TITLE, ref, THEME_LABEL);
+    theme_header(c, "RECITE", THEME_TITLE, ref, THEME_LABEL);
 
     int band_top = 26, band_bot = CANVAS_HEIGHT - THEME_KEYBAR_H - 64;
 
@@ -507,11 +651,46 @@ static void on_render(Canvas *c)
                                   THEME_DIM);
         break;
 
+    case TEA_PICK: {
+        const char *lbl[5] = { "Surah", "From ayah", "To ayah", "Turn size", "Start read-along" };
+        char val[5][40];
+        snprintf(val[0], sizeof val[0], "%d  %s", s_pick_surah, qdb_surah_name(s_pick_surah));
+        snprintf(val[1], sizeof val[1], "%d", s_pick_from);
+        snprintf(val[2], sizeof val[2], "%d", s_pick_to);
+        snprintf(val[3], sizeof val[3], "%s", s_unit == UNIT_PAGE ? "Page" : "Ayah");
+        val[4][0] = 0;
+        int y = 64;
+        for (int i = 0; i < 5; i++) {
+            int ry = y + i * 42;
+            bool sel = (i == s_pick_row);
+            if (sel) theme_sel_block(c, 16, ry, CANVAS_WIDTH - 32, 32);
+            color_t fg = sel ? THEME_SEL_TEXT : THEME_TEXT;
+            font_draw_string(c, 28, ry + 7, &font_small, lbl[i],
+                             sel ? THEME_SEL_TEXT : THEME_DIM);
+            if (val[i][0])
+                font_draw_string_right(c, CANVAS_WIDTH - 28, ry + 7, &font_small, val[i], fg);
+        }
+        font_draw_string_centered(c, y + 5 * 42 + 14, &font_tiny,
+                                  "< > change   OK next   BK back", THEME_DIM);
+        break;
+    }
+
     case TEA_READY:
     case TEA_LISTEN: {
-        draw_ayah_marked(c, band_top, band_bot, false);
-        int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 52;
         bool listening = (s_state == TEA_LISTEN);
+        // While the teacher recites, light up the current word (rolled back by
+        // the output latency so it tracks what's heard). Only when the timing's
+        // word split matches the glyphs 1:1 — otherwise the index would be off.
+        int hl = -1;
+        if (listening && s_timing_ok) {
+            uint32_t pos = hal_audio_pos_ms(s_clip);
+            uint32_t lat = hal_audio_latency_ms(s_clip);
+            int aw = timing_active_word(&s_timing, s_ayah, pos > lat ? pos - lat : 0);
+            hl = tea_glyph_of(aw);   // maps past the basmala prefix on ayah 1
+        }
+        draw_ayah_listen(c, band_top, band_bot, hl, listening);
+        draw_status_band(c, band_bot);
+        int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 52;
         font_draw_string_centered(c, iy, &font_medium,
                                   listening ? "LISTEN" : "READY",
                                   listening ? THEME_ACTIVE : THEME_TITLE);
@@ -523,9 +702,10 @@ static void on_render(Canvas *c)
             font_draw_string_centered(c, iy + 26, &font_tiny, u, THEME_ACTIVE);
         } else
         font_draw_string_centered(c, iy + 26, &font_tiny,
-                                  listening ? "recite it back when the teacher finishes"
+                                  listening ? "your turn is next - follow along"
                                   : s_ready_hint ? s_ready_hint
-                                                 : "the teacher recites, then you repeat",
+                                  : s_style == STYLE_REPEAT ? "Repeat after the reciter - OK to start"
+                                                            : "Take turns with the reciter - OK to start",
                                   !listening && s_ready_hint ? THEME_BADGE : THEME_DIM);
         if (listening) {
             uint32_t pos = hal_audio_pos_ms(s_clip), len = hal_audio_len_ms(s_clip);
@@ -537,7 +717,16 @@ static void on_render(Canvas *c)
     }
 
     case TEA_RECITE: {
-        draw_ayah_marked(c, band_top, band_bot, false);
+        if (s_train < 0) {
+            // Reading aid: the highlight + auto-scroll FOLLOW the reader's voice
+            // (same karaoke scroll as LISTEN, driven by the live cursor).
+            int cur = (s_live && s_live_ayah == s_surah * 1000 + s_ayah)
+                        ? tea_glyph_of(recite_live_cursor_word(s_live)) : -1;
+            draw_ayah_listen(c, band_top, band_bot, cur, true);
+        } else {
+            draw_ayah_marked(c, band_top, band_bot, false);
+        }
+        draw_status_band(c, band_bot);
         int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 52;
         if (s_train >= 0) {   // training capture: show what to perform
             const char *label; char tag[16];
@@ -549,13 +738,12 @@ static void on_render(Canvas *c)
                                       s_va.heard ? THEME_ACTIVE : THEME_BADGE);
             font_draw_string_centered(c, iy + 20, &font_tiny, label, THEME_TEXT);
         } else {
-            // The endpointer drives the flow: recite, pause, it analyzes.
             font_draw_string_centered(c, iy, &font_medium,
-                                      s_va.heard ? "HEARING YOU" : "RECITE",
+                                      s_va.heard ? "FOLLOWING YOU" : "RECITE",
                                       s_va.heard ? THEME_ACTIVE : THEME_BADGE);
             font_draw_string_centered(c, iy + 26, &font_tiny,
-                                      s_va.heard ? "pause when you finish - I'll notice"
-                                                 : "go ahead - I'm listening",
+                                      s_va.heard ? "reading along - pause when you finish"
+                                                 : "start reciting - I'll follow along",
                                       THEME_DIM);
         }
         // Live mic meter.
@@ -565,6 +753,7 @@ static void on_render(Canvas *c)
 
     case TEA_TRAIN: {
         draw_ayah_marked(c, band_top, band_bot, false);
+        draw_status_band(c, band_bot);
         int iy = CANVAS_HEIGHT - THEME_KEYBAR_H - 64;
         const char *label; char tag[16];
         train_label(s_train, &label, tag, sizeof(tag));
@@ -585,12 +774,6 @@ static void on_render(Canvas *c)
         }
         break;
     }
-
-    case TEA_ANALYZE:
-        draw_ayah_marked(c, band_top, band_bot, false);
-        font_draw_string_centered(c, CANVAS_HEIGHT - THEME_KEYBAR_H - 44,
-                                  &font_medium, "ANALYZING...", THEME_TITLE);
-        break;
 
     case TEA_REVIEW: {
         draw_ayah_marked(c, band_top, band_bot, true);
@@ -631,11 +814,22 @@ static void on_render(Canvas *c)
     // Keybar per state.
     switch (s_state) {
     case TEA_READY: {
-        KeyChip k[4] = {
-            { "OK", "LISTEN", 3, { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
+        KeyChip k[5] = {
+            { "OK", "START", 3, { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
             { "^v", "AYAH", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN, INPUT_ENC_CW, INPUT_ENC_CCW } },
-            { ">", "TRAIN", 2, { INPUT_NAV_RIGHT, INPUT_BTN_MODE } },
+            { "<", "MODE", 1, { INPUT_NAV_LEFT } },
+            { ">", "CHOOSE", 1, { INPUT_NAV_RIGHT } },
             { "BK", "HOME", 1, { INPUT_BTN_BACK } },
+        };
+        theme_keybar(c, k, 5);
+        break;
+    }
+    case TEA_PICK: {
+        KeyChip k[4] = {
+            { "^v", "FIELD", 2, { INPUT_NAV_UP, INPUT_NAV_DOWN } },
+            { "<>", "CHANGE", 4, { INPUT_NAV_LEFT, INPUT_NAV_RIGHT, INPUT_ENC_CCW, INPUT_ENC_CW } },
+            { "OK", "NEXT", 3, { INPUT_NAV_SELECT, INPUT_ENC_PUSH, INPUT_BTN_PLAY } },
+            { "BK", "BACK", 1, { INPUT_BTN_BACK } },
         };
         theme_keybar(c, k, 4);
         break;
@@ -695,6 +889,7 @@ static void change_ayah(int dir)
     if (a < 1 || a > qdb_ayah_count(s_surah)) return;
     hal_audio_click(false);
     load_ayah(s_surah, a);
+    s_range_end = qdb_ayah_count(s_surah);   // nudging the start = "from here to end"
 }
 
 static void review_move(int dir)
@@ -705,28 +900,91 @@ static void review_move(int dir)
     hal_audio_click(false);
 }
 
+// Adjust the field the picker cursor is on (surah / from / to).
+static void pick_adjust(int dir)
+{
+    switch (s_pick_row) {
+    case 0:
+        s_pick_surah += dir;
+        if (s_pick_surah < 1) s_pick_surah = QDB_SURAH_COUNT;
+        if (s_pick_surah > QDB_SURAH_COUNT) s_pick_surah = 1;
+        s_pick_from = 1; s_pick_to = qdb_ayah_count(s_pick_surah);
+        break;
+    case 1: {
+        int n = qdb_ayah_count(s_pick_surah);
+        s_pick_from += dir;
+        if (s_pick_from < 1) s_pick_from = 1;
+        if (s_pick_from > n) s_pick_from = n;
+        if (s_pick_to < s_pick_from) s_pick_to = s_pick_from;
+        break;
+    }
+    case 2: {
+        int n = qdb_ayah_count(s_pick_surah);
+        s_pick_to += dir;
+        if (s_pick_to < s_pick_from) s_pick_to = s_pick_from;
+        if (s_pick_to > n) s_pick_to = n;
+        break;
+    }
+    case 3:
+        s_unit = (s_unit == UNIT_AYAH) ? UNIT_PAGE : UNIT_AYAH;
+        break;
+    }
+    hal_audio_click(false);
+}
+
 static void on_input(InputEvent e)
 {
     switch (s_state) {
     case TEA_READY:
         switch (e.type) {
         case INPUT_NAV_SELECT: case INPUT_ENC_PUSH: case INPUT_BTN_PLAY:
-            hal_audio_click(true); start_listen(); break;
+            // Start the read-along session over [current ayah .. s_range_end].
+            hal_audio_click(true);
+            if (s_range_end < s_ayah || s_range_end > qdb_ayah_count(s_surah))
+                s_range_end = qdb_ayah_count(s_surah);
+            s_run = true;
+            begin_turn(s_ayah, true);
+            break;
         case INPUT_NAV_UP: case INPUT_ENC_CCW: change_ayah(-1); break;
         case INPUT_NAV_DOWN: case INPUT_ENC_CW: change_ayah(+1); break;
-        // RIGHT enters training capture: the device's only physical control
-        // is the 5-way (MODE/PLAY exist only as serial-monitor keys).
-        case INPUT_NAV_RIGHT:
-        case INPUT_BTN_MODE:
+        case INPUT_NAV_RIGHT:   // choose surah + range to read
+            hal_audio_click(true);
+            s_pick_surah = s_surah; s_pick_from = s_ayah;
+            s_pick_to = qdb_ayah_count(s_surah); s_pick_row = 0;
+            s_state = TEA_PICK;
+            break;
+        case INPUT_BTN_MODE:    // (serial/dev key) training-capture mode
             hal_audio_click(true);
             s_train = 0;
             s_ready_hint = NULL;
             s_state = TEA_TRAIN;
             break;
-        case INPUT_NAV_LEFT:   // takes still in RAM? share them from here too
-            share_takes();
+        case INPUT_NAV_LEFT:   // toggle read-along style
+            s_style = (s_style == STYLE_REPEAT) ? STYLE_TURNS : STYLE_REPEAT;
+            s_ready_hint = NULL;
+            hal_audio_click(false);
             break;
         case INPUT_BTN_BACK: scene_switch(SCENE_HOME); break;
+        default: break;
+        }
+        break;
+
+    case TEA_PICK:
+        switch (e.type) {
+        case INPUT_NAV_UP:    if (s_pick_row > 0) { s_pick_row--; hal_audio_click(false); } break;
+        case INPUT_NAV_DOWN:  if (s_pick_row < 4) { s_pick_row++; hal_audio_click(false); } break;
+        case INPUT_NAV_LEFT:  case INPUT_ENC_CCW: pick_adjust(-1); break;
+        case INPUT_NAV_RIGHT: case INPUT_ENC_CW:  pick_adjust(+1); break;
+        case INPUT_NAV_SELECT: case INPUT_ENC_PUSH: case INPUT_BTN_PLAY:
+            if (s_pick_row < 4) { s_pick_row++; hal_audio_click(false); }
+            else {   // Start row: apply the selection
+                hal_audio_click(true);
+                load_ayah(s_pick_surah, s_pick_from);
+                s_range_end = s_pick_to;
+                if (s_state != TEA_NO_DATA) { s_ready_hint = NULL; s_state = TEA_READY; }
+            }
+            break;
+        case INPUT_BTN_BACK: s_state = TEA_READY; break;
         default: break;
         }
         break;
@@ -760,7 +1018,7 @@ static void on_input(InputEvent e)
         case INPUT_NAV_SELECT: case INPUT_ENC_PUSH: case INPUT_BTN_PLAY:
             hal_audio_click(true); start_recite(); break;
         case INPUT_BTN_BACK:
-            hal_audio_pause(s_clip); s_state = TEA_READY; break;
+            end_session(NULL); break;
         default: break;
         }
         break;
@@ -771,7 +1029,8 @@ static void on_input(InputEvent e)
             hal_audio_click(true); finish_recite(); break;
         case INPUT_BTN_BACK:
             hal_mic_stop();
-            s_state = (s_train >= 0) ? TEA_TRAIN : TEA_READY;
+            if (s_train >= 0) s_state = TEA_TRAIN;
+            else end_session(NULL);
             break;
         default: break;
         }

@@ -33,7 +33,7 @@ struct HalAudioClip {
 
 static SoundTouch      g_st;
 static SDL_AudioDeviceID g_dev = 0;
-static uint32_t        g_dev_rate = 0, g_dev_ch = 0;
+static uint32_t        g_dev_rate = 0, g_dev_ch = 0, g_dev_buf = 0;  // buf: device period, frames
 
 static HalAudioClip   *g_cur = nullptr;
 static uint64_t        g_src_feed = 0;    // source frames fed into SoundTouch
@@ -99,6 +99,7 @@ static void ensure_device(uint32_t rate, uint32_t ch)
     g_dev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
     g_dev_rate = rate;
     g_dev_ch = ch;
+    g_dev_buf = have.samples ? have.samples : want.samples;
     g_st.setSampleRate(rate);
     g_st.setChannels(ch);
     g_st.setTempo(g_tempo);
@@ -180,6 +181,18 @@ extern "C" uint32_t hal_audio_len_ms(HalAudioClip *c)
     return (uint32_t)(c->frames * 1000ull / c->rate);
 }
 
+extern "C" uint32_t hal_audio_latency_ms(HalAudioClip *c)
+{
+    // pos_ms is advanced when a period is written into the SDL device buffer
+    // (audio_cb), one buffer-period before it is audible; SDL keeps ~2 periods
+    // in flight. Convert that output-frame lead to the ORIGINAL recitation
+    // timeline (pos_ms reports there), so scale by tempo — a slower tempo means
+    // fewer source ms per output period.
+    if (!c || g_dev_rate == 0 || g_dev_buf == 0) return 0;
+    double out_ms = (double)(2u * g_dev_buf) * 1000.0 / (double)g_dev_rate;
+    return (uint32_t)(out_ms * (double)g_tempo);
+}
+
 extern "C" void hal_audio_seek_ms(HalAudioClip *c, uint32_t ms)
 {
     if (!c) return;
@@ -231,8 +244,46 @@ extern "C" uint32_t hal_audio_read_pcm16(HalAudioClip *c, uint32_t start_ms,
 // --- Microphone (host capture via SDL) ---------------------------------------
 static SDL_AudioDeviceID g_mic_dev = 0;
 
+// File "fake mic" (QN_FAKE_MIC=path.wav): stream a WAV in as if it were the
+// microphone, so the Quran Teacher's live follower can be exercised in the sim
+// WITHOUT host mic permission — and deterministically, for tuning. Any WAV is
+// resampled to mono s16 @ the requested rate; a recitation of the current ayah
+// gives meaningful verdicts, anything else just drives the UI.
+static int16_t *g_fake_pcm = nullptr;
+static uint32_t g_fake_n = 0, g_fake_pos = 0, g_fake_hz = 0;
+static bool     g_fake_on = false;
+
+static bool load_fake_mic(uint32_t hz)
+{
+    if (g_fake_pcm && g_fake_hz == hz) return true;
+    const char *path = getenv("QN_FAKE_MIC");
+    if (!path || !*path) return false;
+    SDL_AudioSpec spec; Uint8 *wav = nullptr; Uint32 len = 0;
+    if (!SDL_LoadWAV(path, &spec, &wav, &len)) return false;
+    SDL_AudioCVT cvt;
+    int r = SDL_BuildAudioCVT(&cvt, spec.format, spec.channels, spec.freq,
+                              AUDIO_S16SYS, 1, (int)hz);
+    if (r < 0) { SDL_FreeWAV(wav); return false; }
+    cvt.len = (int)len;
+    cvt.buf = (Uint8 *)malloc((size_t)cvt.len * (cvt.len_mult ? cvt.len_mult : 1));
+    memcpy(cvt.buf, wav, len);
+    SDL_FreeWAV(wav);
+    if (r > 0 && SDL_ConvertAudio(&cvt) < 0) { free(cvt.buf); return false; }
+    free(g_fake_pcm);
+    g_fake_pcm = (int16_t *)cvt.buf;
+    g_fake_n = (uint32_t)((r > 0 ? cvt.len_cvt : cvt.len) / sizeof(int16_t));
+    g_fake_hz = hz;
+    fprintf(stderr, "[mic] FAKE mic from %s -> %u samples @ %u Hz mono\n",
+            path, g_fake_n, hz);
+    return true;
+}
+
 extern "C" bool hal_mic_start(uint32_t hz)
 {
+    if (getenv("QN_FAKE_MIC") && load_fake_mic(hz)) {
+        g_fake_on = true; g_fake_pos = 0;
+        return true;
+    }
     if (g_mic_dev) return true;
     SDL_AudioSpec want, have;
     SDL_zero(want);
@@ -246,7 +297,16 @@ extern "C" bool hal_mic_start(uint32_t hz)
     // assumes `hz` — timestamps 3x fast, silence auto-stop firing mid-
     // recitation, words "not heard". 0 makes SDL resample to `hz` for us.
     g_mic_dev = SDL_OpenAudioDevice(nullptr, 1 /*capture*/, &want, &have, 0);
-    if (!g_mic_dev) return false;
+    if (!g_mic_dev) {
+        // Usually macOS mic permission: a bare CLI binary often gets denied
+        // silently. Say so, and point at the file fallback.
+        fprintf(stderr, "[mic] no capture device: %s — SDL sees %d capture "
+                "device(s). On macOS grant your terminal Microphone access in "
+                "System Settings > Privacy & Security > Microphone (then restart "
+                "the terminal), or run with QN_FAKE_MIC=path.wav to feed a file.\n",
+                SDL_GetError(), SDL_GetNumAudioDevices(1));
+        return false;
+    }
     fprintf(stderr, "[mic] capture open: %d Hz, %d ch\n", have.freq, have.channels);
     SDL_PauseAudioDevice(g_mic_dev, 0);
     return true;
@@ -254,6 +314,19 @@ extern "C" bool hal_mic_start(uint32_t hz)
 
 extern "C" int hal_mic_read(int16_t *buf, int max_samples)
 {
+    if (g_fake_on) {
+        // Pace ~one 33ms tick of audio per call so the live coloring unfolds in
+        // real time; trailing silence lets the endpointer auto-stop the take.
+        int chunk = (int)(g_fake_hz * 33 / 1000);
+        if (chunk > max_samples) chunk = max_samples;
+        uint32_t silence_end = g_fake_n + g_fake_hz * 3;   // 3s tail then done
+        if (g_fake_pos >= silence_end) return 0;
+        for (int i = 0; i < chunk; i++)
+            buf[i] = g_fake_pos + (uint32_t)i < g_fake_n
+                       ? g_fake_pcm[g_fake_pos + i] : 0;
+        g_fake_pos += (uint32_t)chunk;
+        return chunk;
+    }
     if (!g_mic_dev) return -1;
     Uint32 avail = SDL_GetQueuedAudioSize(g_mic_dev);
     Uint32 want = (Uint32)max_samples * sizeof(int16_t);
@@ -265,6 +338,7 @@ extern "C" int hal_mic_read(int16_t *buf, int max_samples)
 
 extern "C" void hal_mic_stop(void)
 {
+    if (g_fake_on) { g_fake_on = false; g_fake_pos = 0; return; }
     if (!g_mic_dev) return;
     SDL_CloseAudioDevice(g_mic_dev);
     g_mic_dev = 0;
