@@ -167,6 +167,7 @@ extern "C" void hal_audio_pause(HalAudioClip *c)
 }
 
 extern "C" bool hal_audio_is_playing(HalAudioClip *c) { (void)c; return g_playing; }
+extern "C" bool hal_audio_active(void) { return g_playing; }
 
 extern "C" uint32_t hal_audio_pos_ms(HalAudioClip *c)
 {
@@ -343,6 +344,8 @@ extern "C" void hal_mic_stop(void)
     SDL_CloseAudioDevice(g_mic_dev);
     g_mic_dev = 0;
 }
+
+extern "C" bool hal_mic_active(void) { return g_fake_on || g_mic_dev != 0; }
 
 // --- Raw PCM playback (the user's own recording) -----------------------------
 static SDL_AudioDeviceID g_pcm_dev = 0;

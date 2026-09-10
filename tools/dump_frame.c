@@ -95,6 +95,7 @@ void hal_audio_close(HalAudioClip *c){ (void)c; s_aud_playing = false; }
 void hal_audio_play(HalAudioClip *c){ (void)c; s_aud_playing = true; }
 void hal_audio_pause(HalAudioClip *c){ (void)c; s_aud_playing = false; }
 bool hal_audio_is_playing(HalAudioClip *c){ (void)c; return s_aud_playing; }
+bool hal_audio_active(void){ return s_aud_playing; }
 uint32_t hal_audio_pos_ms(HalAudioClip *c){ (void)c; return (uint32_t)s_aud_pos; }
 uint32_t hal_audio_len_ms(HalAudioClip *c){ (void)c; return S_AUD_LEN; }
 uint32_t hal_audio_latency_ms(HalAudioClip *c){ (void)c; return 0; }
@@ -139,6 +140,7 @@ static uint64_t s_mic_pos;
 static bool s_mic_on;
 bool hal_mic_start(uint32_t hz) { (void)hz; s_mic_on = true; s_mic_pos = 0; return true; }
 void hal_mic_stop(void) { s_mic_on = false; }
+bool hal_mic_active(void) { return s_mic_on; }
 int hal_mic_read(int16_t *buf, int max_samples)
 {
     // Emit the synthetic signal in real-time-ish chunks (33ms per tick):

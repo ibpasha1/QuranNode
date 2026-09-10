@@ -73,6 +73,11 @@ void   hal_audio_close(HalAudioClip *clip);
 void   hal_audio_play(HalAudioClip *clip);            // (re)start playback
 void   hal_audio_pause(HalAudioClip *clip);
 bool   hal_audio_is_playing(HalAudioClip *clip);
+// Clip-agnostic "is any recitation audio playing right now" — for the idle
+// dimmer to stay lit during playback started outside the main player (Recite
+// read-along, Library media), which hal_audio_is_playing(a specific clip) misses.
+bool   hal_audio_active(void);
+bool   hal_mic_active(void);   // is the mic currently capturing (recite/your turn)
 uint32_t hal_audio_pos_ms(HalAudioClip *clip);        // current playhead
 uint32_t hal_audio_len_ms(HalAudioClip *clip);        // total duration
 // Output latency: how far pos_ms LEADS the sound actually leaving the speaker,

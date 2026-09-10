@@ -34,7 +34,14 @@ static void backlight_wake(void)
 
 static void backlight_service(uint32_t dt_ms)
 {
-    if (g_player.playing) { backlight_wake(); return; }   // following along: keep lit
+    // Keep lit while actively engaged: the main player, OR audio playing from
+    // another path (Recite read-along, Library media), OR the mic capturing
+    // (your turn in Recite). A silently-read static page still dims — that's
+    // indistinguishable from having walked away.
+    if (g_player.playing || hal_audio_active() || hal_mic_active()) {
+        backlight_wake();
+        return;
+    }
     s_idle_ms += dt_ms;
     if (s_bl_state < 2 && s_idle_ms >= BL_OFF_MS) {
         hal_set_brightness(0);
