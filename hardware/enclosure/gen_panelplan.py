@@ -64,11 +64,12 @@ fv.rect(P.SCR_CX,P.SCR_CY,P.SCR_MOD_W,P.SCR_MOD_H, outline=COMP, width=1)
 fv.rrect(P.SCR_CX,P.SCR_CY,P.SCR_GLASS_W,P.SCR_GLASS_H,int(2*S), outline=GRN, fill=GRNF, width=3)
 fv.rect(P.SCR_CX,P.SCR_CY,P.SCR_ACT_W,P.SCR_ACT_H, outline=(0,150,110), width=1)
 ctext(fv.px(P.SCR_CX),fv.py(P.SCR_CY),'3.5"\n480x320\nST7796S',GRN,15)
-# ---- FRONT: dpad board (41x25 landscape, faint) + nav cutout + SET/RST + pegs
+# ---- FRONT: dpad board (41x25 landscape, faint) + nav cutout + SET/RST
 fv.rect(P.DPAD_CX,P.DPAD_CY,P.DPAD_W,P.DPAD_H, outline=COMP, width=1)
-for (hx,hy) in P.DPAD_HOLES: fv.circ(hx,hy,3.0, outline=COMP, width=1)
-# nav: round hole exposing the 5-way switch knob directly
-fv.circ(P.NAV_CX,P.NAV_CY,P.NAV_D, outline=ACC, fill=CUT, width=3)
+# nav: SQUARE opening sized to the 9.9mm switch body (+clr); body noses up thru lid
+_navsw = P.NAV_SW + 2*P.NAV_SW_CLR
+fv.rrect(P.NAV_CX,P.NAV_CY,_navsw,_navsw,int(1.0*S), outline=ACC, fill=CUT, width=3)
+fv.rrect(P.NAV_CX,P.NAV_CY,P.NAV_SW,P.NAV_SW,int(0.8*S), outline=DIM, width=1)
 ctext(fv.px(P.NAV_CX),fv.py(P.NAV_CY),"NAV",ACC,9)
 # SET/RST tactiles are covered (no cutouts) -- D-pad only
 # ---- FRONT: mic grille (earpiece cluster) between screen and dpad

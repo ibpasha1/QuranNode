@@ -33,8 +33,15 @@ LIP_H, LIP_GAP = 3.0, P.CLR              # lid lip depth + side clearance to wal
 TOP_FILLET, BOT_FILLET = 0.8, 1.0   # top < TOP_T (1.4) or the round-over degenerates
 
 # snap-fit tabs (edge code: B=bottom Y0, T=top YIH, L=left X0, R=right XIW)
-SNAP_W, SNAP_PROJ, SNAP_H = 8.0, 0.8, 1.5
-SNAP_TABS = [("B",12.0),("B",52.0),("T",12.0),("T",41.0),("L",100.0),("R",100.0)]  # clear of ports
+# Rev F: bigger nibs (wider 8->10, deeper 0.8->1.0, taller 1.5->2.0) + 11 of them
+# (was 6) for a firmer, more even latch. Positions dodge the ports + power switch.
+SNAP_W, SNAP_PROJ, SNAP_H = 10.0, 1.0, 2.0
+SNAP_TABS = [
+    ("B",28.0),("B",57.0),                 # bottom edge  (HP X7.7-14.3, USB X41.25-50.75 avoided)
+    ("T",10.0),("T",40.0),("T",54.0),      # top edge     (SD X17-29 avoided; USB moved off top)
+    ("L",35.0),("L",75.0),("L",115.0),     # left edge    (power switch @ Y140 avoided)
+    ("R",35.0),("R",75.0),("R",115.0),     # right edge
+]
 
 Z_LEDGE = TOTAL - P.SCR_GLASS_STACK      # module-PCB seat (glass ends up flush w/ top)
 
@@ -192,18 +199,17 @@ def build_lid():
     lip = ring(LIPW, LIPL, LIP_H, 1.2, max(0.1, R_IN-LIP_GAP), (LIPX0, LIPY0, LID_UNDER-LIP_H))
     lid = plate.fuse(lip)
     lid = lid.fuse(Part.makeCompound([snap_nib(s,c) for (s,c) in SNAP_TABS]))
-    # Locating PEGS hanging from the lid underside -> drop into the board mounting
-    # holes so the D-pad and mic self-align, then tape/press them to the lid.
-    pegs = []
-    for (bx,by) in P.DPAD_HOLES:
-        pegs.append(cyl(P.DPAD_PEG_D, P.DPAD_PEG_H, (bx, by, LID_UNDER-P.DPAD_PEG_H)))
-    for (bx,by) in P.MIC_PEGS:
-        pegs.append(cyl(P.MIC_PEG_D, P.MIC_PEG_H, (bx, by, LID_UNDER-P.MIC_PEG_H)))
-    lid = lid.fuse(Part.makeCompound(pegs))
+    # No locating pegs -- they were eyeballed and didn't match the real boards. The
+    # D-pad is centred by its switch body in the NAV opening; the mic sits under its
+    # grille. Both boards are taped/pressed to the lid.
     lid = fillet_perimeter(lid, TOTAL, TOP_FILLET)   # round top edge while it's still a clean face
     zc, hZ = LID_UNDER-1, P.TOP_T+2
     tools = []
-    tools.append(cyl(P.NAV_D, hZ, (P.NAV_CX, P.NAV_CY, zc)))          # round hole over the 5-way knob
+    # NAV: a SQUARE opening sized to the 9.9 mm switch body (+clearance) so the body
+    # noses UP through the lid and the actuator protrudes; PCB seats near the inner
+    # face. Rounded corners for printability.
+    _sw = P.NAV_SW + 2*P.NAV_SW_CLR
+    tools.append(rrect(_sw, _sw, hZ, 1.0, (P.NAV_CX - _sw/2, P.NAV_CY - _sw/2, zc)))
     tools += mic_grille(zc, hZ)                                        # INMP441 mic grille
     # flush screen mount: fuse ledge, then cut the glass opening + all holes
     adds, dcuts = screen_features()
