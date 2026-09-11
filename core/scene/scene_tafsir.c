@@ -250,7 +250,7 @@ static void on_input(InputEvent e)
             break;
         case INPUT_BTN_BACK:
             // Refuse to leave with no target — the dashboard would be empty.
-            if (tglearn_scope().kind == TGL_SCOPE_NONE) scene_switch(SCENE_HIFZ);
+            if (tglearn_scope().kind == TGL_SCOPE_NONE) scene_switch(SCENE_HOME);
             else s_mode = DASH;
             break;
         default: break;
@@ -273,7 +273,7 @@ static void on_input(InputEvent e)
     case INPUT_BTN_BACK:
     case INPUT_BTN_MENU:
         tglearn_flush();
-        scene_switch(SCENE_HIFZ);
+        scene_switch(SCENE_HOME);
         break;
     default: break;
     }

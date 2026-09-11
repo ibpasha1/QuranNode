@@ -540,6 +540,15 @@ static void pick_adjust(int dir)
 
 static void on_input(InputEvent e)
 {
+    // MODE crosses over to the meaning game from any Lessons mode — including
+    // the target picker a first-time user lands on before setting a target.
+    if (e.type == INPUT_BTN_MODE) {
+        hal_audio_click(true);
+        hifz_flush();
+        scene_switch(SCENE_TAFSIR);
+        return;
+    }
+
     if (s_mode == MAP) {
         switch (e.type) {
         case INPUT_NAV_UP:
@@ -661,12 +670,6 @@ static void on_input(InputEvent e)
         s_weak_sel = 0;
         s_map_seq = 0;   // force a rebuild
         s_mode = MAP;
-        break;
-    case INPUT_BTN_MODE:
-        // Cross over to the meaning game — its own lesson, its own target.
-        hal_audio_click(true);
-        hifz_flush();
-        scene_switch(SCENE_TAFSIR);
         break;
     case INPUT_BTN_BACK:
     case INPUT_BTN_MENU:

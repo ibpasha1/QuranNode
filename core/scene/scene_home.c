@@ -28,6 +28,7 @@ static const HomeItem ITEMS[] = {
     { "Quran",         ICON_BOOK,   SCENE_NAV },
     { "Progress",      ICON_INFO,   SCENE_PROGRESS },
     { "Lessons",       ICON_NOTE,   SCENE_HIFZ },
+    { "Meanings",      ICON_FX,     SCENE_TAFSIR },
     { "Recite",        ICON_WAVE,   SCENE_TEACHER },
     { "Practice",      ICON_REPEAT, SCENE_LOOP },
     { "Library",       ICON_FOLDER, SCENE_LIBRARY },
