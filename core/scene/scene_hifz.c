@@ -322,15 +322,16 @@ static void render_view(Canvas *c)
         font_draw_string_centered(c, ty + 4, &font_tiny, s_toast_msg, THEME_ACCENT);
     }
 
-    KeyChip chips[5] = {
+    KeyChip chips[6] = {
         { "^v", "PICK", 4, { INPUT_NAV_UP, INPUT_NAV_DOWN,
                              INPUT_ENC_CW, INPUT_ENC_CCW } },
         { "OK", s_nrows ? "DRILL" : "NEW", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
         { "<",  s_nrows ? "GRADE" : "", s_nrows ? 1 : 0, { INPUT_NAV_LEFT } },
         { ">",  "MAP", 1, { INPUT_NAV_RIGHT } },
+        { "MD", "MEANING", 1, { INPUT_BTN_MODE } },
         { "BK", "HOME", 1, { INPUT_BTN_BACK } },
     };
-    theme_keybar(c, chips, 5);
+    theme_keybar(c, chips, 6);
 }
 
 // --- grading overlay ------------------------------------------------------
@@ -660,6 +661,12 @@ static void on_input(InputEvent e)
         s_weak_sel = 0;
         s_map_seq = 0;   // force a rebuild
         s_mode = MAP;
+        break;
+    case INPUT_BTN_MODE:
+        // Cross over to the meaning game — its own lesson, its own target.
+        hal_audio_click(true);
+        hifz_flush();
+        scene_switch(SCENE_TAFSIR);
         break;
     case INPUT_BTN_BACK:
     case INPUT_BTN_MENU:

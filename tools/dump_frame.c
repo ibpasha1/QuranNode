@@ -11,8 +11,6 @@
 #include "hal.h"
 #include "app.h"
 #include "canvas.h"
-#include "scene.h"
-#include "tglearn.h"
 #include "plat.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -229,10 +227,6 @@ int main(int argc, char **argv)
         case 'v': app_input(ev(INPUT_NAV_DOWN));  break;
         case 'u': app_input(ev(INPUT_NAV_UP));    break;
         case 'k': app_input(ev(INPUT_BTN_BOOKMARK)); break;
-        case 'T':   // dev: seed a target and jump into the tafsir game
-            tglearn_set_scope(TGL_SCOPE_SURAH, 1, false);
-            scene_switch(SCENE_TAFSIR_PLAY);
-            break;
         case 'l': app_input(ev(INPUT_NAV_LEFT));  break;
         case 'h': app_input(ev(INPUT_NAV_RIGHT)); break;
         case 't':   // advance 500ms of virtual time mid-script (33ms ticks)
