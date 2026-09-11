@@ -34,6 +34,7 @@ static int    s_bm_toast = 0;    // frames remaining on the "Bookmarked" confirm
 // ayah's top); s_scroll_key detects an ayah change so the scroll resets.
 static float  s_scroll = 0.f;
 static int    s_manual_scroll = 0;
+static bool   s_was_playing = false; // prev frame's play state, to catch pause
 static int    s_scroll_key = -1;
 static bool   s_overflow = false;   // set by on_render, read by on_input
 static int    s_max_scroll = 0;     // set by on_render, read by on_input
@@ -141,6 +142,39 @@ static const color_t TAJWEED_PAL[] = {
 };
 #define TAJWEED_N ((int)(sizeof(TAJWEED_PAL) / sizeof(TAJWEED_PAL[0])))
 
+// Ayah 1 of every surah but 1 (which *is* the basmala) and 9 (which has none)
+// is drawn with a leading 4-word "Bismillah…" that the timing data doesn't
+// carry — the recitation clips start at the ayah's own first word.
+#define BASMALA_WORDS 4
+
+// Map the reciter's timing word index onto the drawn glyph words. They line up
+// 1:1 for most ayat, but the drawn ayah 1 has the basmala prefix the timing
+// lacks (so the highlight would otherwise sit 4 words too early, on the
+// basmala, while the audio recites the actual ayah), and ~12% of ayat split
+// words differently. Returns -1 only when there's nothing to show yet.
+static int hl_word(int surah, int ayah, int active_word)
+{
+    if (active_word < 0) return -1;
+    int tw = timing_word_count(&s_player.timing, ayah);
+    if (tw <= 0) return -1;
+    if (qdb_words_agree(surah, ayah, tw)) return active_word;   // splits line up 1:1
+    int dw = qdb_word_count(surah, ayah);
+    if (dw <= 0) return -1;
+    // Ayah 1 carries the basmala prefix the timing lacks: skip past it so the
+    // remaining words line up 1:1 with the reciter.
+    if (ayah == 1 && surah != 1 && surah != 9 && dw == tw + BASMALA_WORDS)
+        return active_word + BASMALA_WORDS;
+    // Splits disagree some other way (658 ayat, occasionally by many words).
+    // Sweep the highlight proportionally so it still tracks the recitation
+    // across the whole ayah — approximate at the word boundaries, but
+    // continuous — instead of dropping it (which stalls the highlight and the
+    // follow-scroll for the entire ayah).
+    int mapped = (int)(((float)active_word + 0.5f) * (float)dw / (float)tw);
+    if (mapped < 0) mapped = 0;
+    if (mapped >= dw) mapped = dw - 1;
+    return mapped;
+}
+
 // Draw the ayah at pack (surah:ayah), horizontally centered with its top at
 // `top`. `colored` uses the tajweed palette (only for the focused ayah).
 static int draw_ayah(Canvas *c, int surah, int ayah, int top, color_t col, int hl, bool colored)
@@ -218,9 +252,9 @@ static void on_render(Canvas *c)
     AyahGlyphs cur;
     if (!glyphpack_get(&s_pack, surah, ayah, &cur)) {
         font_draw_string_centered(c, CANVAS_HEIGHT / 2 - 12, &font_small,
-                                  "Not in the bundled sample yet", THEME_DIM);
+                                  "This ayah isn't on the SD card", THEME_DIM);
         font_draw_string_centered(c, CANVAS_HEIGHT / 2 + 6, &font_tiny,
-                                  "(only Al-Fatihah is loaded)", THEME_DIM);
+                                  "Copy the repo's sdcard/ to the card", THEME_DIM);
         theme_hint(c, "<> ayah    BACK home");
         return;
     }
@@ -246,12 +280,25 @@ static void on_render(Canvas *c)
         s_overflow = overflow;
         s_max_scroll = overflow ? (cur.h - view_h) : 0;
 
+        // On pause, freeze the scroll where the follow left it rather than
+        // snapping to the (stale) manual baseline — otherwise the ayah jerks
+        // up on pause and eases back down on resume. Seeding s_manual_scroll
+        // from the current offset also lets Up/Down continue from here.
+        if (s_was_playing && !s_player.playing) {
+            int m = (int)(s_scroll + 0.5f);
+            if (m < 0) m = 0;
+            if (m > s_max_scroll) m = s_max_scroll;
+            s_manual_scroll = m;
+        }
+        s_was_playing = s_player.playing;
+
         if (!overflow) {
             // Fits: center in the band, clamped so it can't ride under the header.
             int cur_top = band_top + (band_bot - band_top - cur.h) / 2;
             if (cur_top < band_top) cur_top = band_top;
             // Focused ayah: tajweed-colored when enabled.
-            draw_ayah(c, surah, ayah, cur_top, THEME_TEXT, s_player.active_word, g_prefs.tajweed);
+            draw_ayah(c, surah, ayah, cur_top, THEME_TEXT,
+                      hl_word(surah, ayah, s_player.active_word), g_prefs.tajweed);
 
             // At large font sizes there's no room for context — focus ayah only.
             if (!prefs_font_is_large()) {
@@ -275,9 +322,9 @@ static void on_render(Canvas *c)
             // manual Up/Down scroll. No context ayat in this mode.
             int target;
             AtWordBox b;
+            int hlw = hl_word(surah, ayah, s_player.active_word);
             if (s_player.playing) {
-                if (s_player.active_word >= 0 &&
-                    ayah_word_box(&cur, s_player.active_word, &b))
+                if (hlw >= 0 && ayah_word_box(&cur, hlw, &b))
                     target = (b.y + b.h / 2) - (int)(view_h * 0.42f);
                 else
                     target = (int)s_scroll;   // hold between words / at ayah end
@@ -292,7 +339,7 @@ static void on_render(Canvas *c)
             else           s_scroll += ((float)target - s_scroll) * 0.25f;
 
             int top = band_top - (int)(s_scroll + 0.5f);
-            draw_ayah(c, surah, ayah, top, THEME_TEXT, s_player.active_word, g_prefs.tajweed);
+            draw_ayah(c, surah, ayah, top, THEME_TEXT, hlw, g_prefs.tajweed);
 
             // The ayah scrolled up into the header band — repaint the header over it
             // (mirrors how the opaque transport panel masks the bottom overflow).

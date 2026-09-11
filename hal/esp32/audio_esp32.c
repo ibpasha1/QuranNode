@@ -18,8 +18,10 @@
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 #define MINIMP3_IMPLEMENTATION
 #include "minimp3_ex.h"
@@ -78,6 +80,37 @@ static void set_out_rate(int hz)
 
 bool audio_esp32_pcm_pump(void);   // user-recording playback (defined below)
 
+// --- UI click tick ---------------------------------------------------------
+// A short decaying sine mixed straight into the I2S output. The previous no-op
+// left menus silent on the device; the sim has always ticked. Two things made
+// this non-trivial and are handled here: (1) the speaker amp is normally off
+// outside playback, so a click has to switch it on, and (2) toggling the amp
+// for every tap would pop it — so the idle path holds the amp on for a short
+// "linger" after each tick, meaning a burst of menu taps pops the amp once.
+#define CLICK_MAX        1024    // samples; ~23ms @44.1k, caps a ~12ms tick
+#define CLICK_LINGER_MS  1200    // keep the amp on this long after the last tick
+static int16_t      s_click[CLICK_MAX];
+static volatile int s_click_len;   // 0 = nothing queued
+static volatile int s_click_pos;
+static TickType_t   s_amp_off_at;  // idle path holds PIN_AMP_EN on until this tick
+
+// Add the queued tick into a stereo buffer (both channels), advancing the
+// cursor. Runs on the audio task; the UI task fills s_click under s_mtx.
+static void mix_click(int16_t *stereo, int frames)
+{
+    if (s_click_len <= 0) return;
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    int p = s_click_pos, len = s_click_len;
+    for (int i = 0; i < frames && p < len; i++, p++) {
+        int32_t s = s_click[p];
+        stereo[i * 2]     = sat16((int32_t)stereo[i * 2]     + s);
+        stereo[i * 2 + 1] = sat16((int32_t)stereo[i * 2 + 1] + s);
+    }
+    s_click_pos = p;
+    if (p >= len) { s_click_len = 0; s_click_pos = 0; }
+    xSemaphoreGive(s_mtx);
+}
+
 static void audio_task(void *arg)
 {
     (void)arg;
@@ -95,10 +128,21 @@ static void audio_task(void *arg)
             // Not playing (paused / clip closed / between surahs): keep feeding the
             // I2S DMA with SILENCE. Otherwise the DMA loops the last buffer of PCM
             // and you hear a buzzy glitch on pause and when leaving the reader.
+            // Any pending UI click tick is folded into that silence.
             if (s_i2s_ok) {
-                static const int16_t silence[256] = {0};   // ~1.5ms stereo @44.1k
+                int16_t out[256];              // 128 stereo frames (~2.9ms @44.1k)
+                memset(out, 0, sizeof(out));
+                if (s_click_len > 0) {
+                    mix_click(out, 128);
+                    s_amp_off_at = xTaskGetTickCount() + pdMS_TO_TICKS(CLICK_LINGER_MS);
+                }
+                // Hold the amp on through the tick and its linger window so a run
+                // of menu taps pops PIN_AMP_EN once, not once per click.
+                bool amp = s_output_speaker && s_amp_off_at &&
+                           xTaskGetTickCount() < s_amp_off_at;
+                gpio_set_level(PIN_AMP_EN, amp ? 1 : 0);
                 size_t wr;
-                i2s_channel_write(s_tx, silence, sizeof(silence), &wr, pdMS_TO_TICKS(20));
+                i2s_channel_write(s_tx, out, sizeof(out), &wr, pdMS_TO_TICKS(20));
             } else {
                 vTaskDelay(pdMS_TO_TICKS(8));
             }
@@ -140,6 +184,7 @@ static void audio_task(void *arg)
                 for (int i = 0; i < samples * 2; i++) s_pcm[i] = sat16((s_pcm[i] * g) >> 8);
                 buf = s_pcm;
             }
+            mix_click(buf, samples);   // fold in a UI tick if one is queued
             size_t bytes = (size_t)samples * 2 * sizeof(int16_t);
             size_t wr = 0;
             i2s_channel_write(s_tx, buf, bytes, &wr, portMAX_DELAY);
@@ -219,6 +264,7 @@ void hal_audio_play(HalAudioClip *c)
 
 void hal_audio_pause(HalAudioClip *c) { (void)c; s_playing = false; spk(false); }
 bool hal_audio_is_playing(HalAudioClip *c) { (void)c; return s_playing; }
+bool hal_audio_active(void) { return s_playing; }
 
 uint32_t hal_audio_pos_ms(HalAudioClip *c)
 {
@@ -226,6 +272,17 @@ uint32_t hal_audio_pos_ms(HalAudioClip *c)
     return (uint32_t)((uint64_t)c->played * 1000 / c->hz);
 }
 uint32_t hal_audio_len_ms(HalAudioClip *c) { return c ? c->len_ms : 0; }
+
+uint32_t hal_audio_latency_ms(HalAudioClip *c)
+{
+    // `played` counts frames the moment they're decoded and written into the
+    // I2S DMA ring; i2s_channel_write blocks (portMAX_DELAY) once the ring is
+    // full, so the decode cursor sits ~one DMA depth ahead of what's leaving
+    // the pin. Default channel config: dma_desc_num(6) * dma_frame_num(240).
+    // pos_ms therefore leads the audible playhead by that depth.
+    if (!c || c->hz == 0) return 0;
+    return (uint32_t)((uint64_t)(6 * 240) * 1000 / c->hz);
+}
 
 void hal_audio_seek_ms(HalAudioClip *c, uint32_t ms)
 {
@@ -250,9 +307,32 @@ void hal_audio_set_output(int speaker) {
     if (!s_output_speaker) gpio_set_level(PIN_AMP_EN, 0);   // mute amp in headphone mode
 }
 
-// UI click: no-op on device for now. TODO: mix a short tick into the I2S
-// stream (needs a tiny mixer stage in the render task; avoid amp pops).
-void hal_audio_click(bool accent) { (void)accent; }
+// UI click: render a short decaying-sine tick at the current output rate and
+// queue it; the audio task mixes it into the I2S stream (see mix_click) and
+// manages the amp. Accent clicks ring brighter, matching the sim.
+void hal_audio_click(bool accent)
+{
+    if (!s_i2s_ok) return;
+    int hz = s_out_hz > 0 ? s_out_hz : OUT_RATE;
+    int n = hz * 12 / 1000;                 // ~12ms
+    if (n > CLICK_MAX) n = CLICK_MAX;
+    const float freq = accent ? 1760.0f : 1175.0f;
+
+    // Stop the audio task consuming the buffer while we refill it, render, then
+    // publish the length last so it never reads a half-written tick.
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    s_click_len = 0;
+    xSemaphoreGive(s_mtx);
+    for (int i = 0; i < n; i++) {
+        float t = (float)i / (float)hz;
+        float v = 0.16f * expf(-t * 420.0f) * sinf(6.2831853f * freq * t);
+        s_click[i] = (int16_t)(v * 32767.0f);
+    }
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    s_click_pos = 0;
+    s_click_len = n;
+    xSemaphoreGive(s_mtx);
+}
 
 // --- INMP441 I2S microphone (I2S_NUM_1) — Quran Teacher recording ----------
 static i2s_chan_handle_t s_rx;
@@ -267,24 +347,48 @@ static uint32_t s_mic_clip;   // saturated samples this session (logged on stop)
 
 bool hal_mic_start(uint32_t hz)
 {
-    if (s_mic_ok) return true;
-    i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
-    if (i2s_new_channel(&cc, NULL, &s_rx) != ESP_OK) { s_rx = NULL; return false; }
-    // INMP441 is 24-bit data left-justified in a 32-bit slot; L/R->GND = left.
-    i2s_std_config_t sc = {
-        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(hz),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
-        .gpio_cfg = { .mclk = I2S_GPIO_UNUSED, .bclk = PIN_MIC_SCK, .ws = PIN_MIC_WS,
-                      .dout = I2S_GPIO_UNUSED, .din = PIN_MIC_SD },
-    };
-    sc.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
-    if (i2s_channel_init_std_mode(s_rx, &sc) != ESP_OK ||
-        i2s_channel_enable(s_rx) != ESP_OK) {
-        i2s_del_channel(s_rx); s_rx = NULL; return false;
+    if (s_mic_ok) return true;   // already capturing
+
+    // Create the I2S RX channel ONCE and keep it resident for the life of the
+    // process — only enable/disable it per take. The read-along starts+stops
+    // the mic many times a session, and repeatedly new/del-ing an I2S channel
+    // intermittently failed ("No microphone", solid wiring): the peripheral/DMA
+    // isn't guaranteed released before the next i2s_new_channel, and its DMA
+    // descriptors want internal RAM that can be momentarily fragmented. Creating
+    // once shrinks that failure window to a single per-boot attempt.
+    if (!s_rx) {
+        i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+        if (i2s_new_channel(&cc, NULL, &s_rx) != ESP_OK) {
+            s_rx = NULL;
+            ESP_LOGE(TAG, "mic: i2s_new_channel(I2S_NUM_1) failed — DMA-cap free=%u internal=%u",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            return false;
+        }
+        // INMP441 is 24-bit data left-justified in a 32-bit slot; L/R->GND = left.
+        i2s_std_config_t sc = {
+            .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(hz),
+            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+            .gpio_cfg = { .mclk = I2S_GPIO_UNUSED, .bclk = PIN_MIC_SCK, .ws = PIN_MIC_WS,
+                          .dout = I2S_GPIO_UNUSED, .din = PIN_MIC_SD },
+        };
+        sc.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+        if (i2s_channel_init_std_mode(s_rx, &sc) != ESP_OK) {
+            i2s_del_channel(s_rx); s_rx = NULL;
+            ESP_LOGE(TAG, "mic: i2s init failed — check INMP441 wiring: "
+                     "SCK=GPIO%d WS=GPIO%d SD=GPIO%d, L/R->GND, VDD=3V3",
+                     PIN_MIC_SCK, PIN_MIC_WS, PIN_MIC_SD);
+            return false;
+        }
+    }
+
+    if (i2s_channel_enable(s_rx) != ESP_OK) {
+        ESP_LOGE(TAG, "mic: i2s_channel_enable failed");
+        return false;
     }
     s_mic_ok = true;
     s_hp_x = s_hp_y = 0;   // reset the high-pass state per session
-    ESP_LOGI(TAG, "INMP441 mic started %uHz (SCK%d WS%d SD%d)",
+    ESP_LOGI(TAG, "INMP441 mic on %uHz (SCK%d WS%d SD%d)",
              (unsigned)hz, PIN_MIC_SCK, PIN_MIC_WS, PIN_MIC_SD);
     return true;
 }
@@ -320,10 +424,11 @@ void hal_mic_stop(void)
         ESP_LOGW(TAG, "mic: %u samples clipped this take (reduce gain?)",
                  (unsigned)s_mic_clip);
     s_mic_clip = 0;
-    i2s_channel_disable(s_rx);
-    i2s_del_channel(s_rx);
-    s_rx = NULL; s_mic_ok = false;
+    i2s_channel_disable(s_rx);   // keep the channel resident (see hal_mic_start);
+    s_mic_ok = false;            // only disable — never del, so re-start can't race
 }
+
+bool hal_mic_active(void) { return s_mic_ok; }
 
 // --- Reference recitation PCM readback (Quran Teacher analysis) ------------
 // Full decode of the clip's MP3 to mono s16 with a LOCAL decoder instance —

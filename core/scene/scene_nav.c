@@ -7,6 +7,7 @@
 #include "scene.h"
 #include "player.h"
 #include "progress.h"
+#include "prefs.h"
 #include "khatm.h"
 #include "quran_db.h"
 #include "theme.h"
@@ -16,6 +17,7 @@
 #include "hal.h"
 #include "plat.h"
 #include <stdio.h>
+#include <string.h>
 
 typedef enum { NAV_ROOT, NAV_SURAH, NAV_JUZ, NAV_PAGE, NAV_BOOKMARKS,
                NAV_MODE_COUNT } NavMode;
@@ -32,8 +34,28 @@ static InputAccel s_accel;   // hold-to-scroll ramp for the long lists
 // Root rows are taller "launcher" entries with an icon and a right-hand detail.
 #define ROOT_ROW_H 34
 
-// The bundled sample only has content for these surahs (extend as data grows).
-static bool content_available(int surah) { return surah == 1; }
+// A surah is "available" when its glyph pack for the current font/tajweed prefs
+// is actually on the card. This used to be hardcoded to `surah == 1` from the
+// days only Al-Fatihah shipped; now the full library is on SD, so we ask the
+// filesystem. Cached (0 unknown / 1 yes / -1 no) because the nav lists re-query
+// every visible row every frame and hal_fs_exists() hits the slow SD card; the
+// cache is rebuilt when the size or tajweed toggle picks a different pack dir.
+// Al-Fatihah is always available — it's baked into flash as the no-SD safety net.
+static bool content_available(int surah)
+{
+    if (surah < 1 || surah > QDB_SURAH_COUNT) return false;
+    if (surah == 1) return true;
+    static int8_t cache[QDB_SURAH_COUNT + 1];
+    static int cache_size = -1, cache_tj = -1;
+    if (cache_size != g_prefs.font_size || cache_tj != (int)g_prefs.tajweed) {
+        memset(cache, 0, sizeof(cache));
+        cache_size = g_prefs.font_size;
+        cache_tj = (int)g_prefs.tajweed;
+    }
+    if (!cache[surah])
+        cache[surah] = hal_fs_exists(prefs_font_pack(surah)) ? 1 : -1;
+    return cache[surah] > 0;
+}
 
 // --- "Resume or start over?" prompt for a partially-read surah -------------
 // Opening a surah you've already begun shouldn't silently restart it. When it's
@@ -78,48 +100,53 @@ static void pct_str(float frac, char *b, int n)
     else snprintf(b, n, "%d%%", p);
 }
 
+// Colour a completion percentage at a glance: green when finished, gold while
+// in progress, dim when untouched.
+static color_t frac_color(float frac)
+{
+    int p = (int)(frac * 100.f + 0.5f);
+    if (p >= 100) return THEME_ACTIVE;   // green — fully read
+    if (p > 0)    return THEME_ACCENT;    // gold — partway through
+    return THEME_DIM;                     // untouched
+}
+
 // Fill the three columns of a list row: leading index (soft blue), main name,
 // and a right-aligned detail (dim). Any column may come back empty.
 static void row_cols(int i, char *idx, int ni, char *name, int nn,
-                     char *detail, int nd, bool *dim)
+                     char *detail, int nd, bool *dim, float *frac)
 {
     idx[0] = name[0] = detail[0] = 0;
     *dim = false;
+    *frac = -1.f;   // no completion figure for this row
     switch (s_mode) {
     case NAV_ROOT:
         break;   // root uses its own launcher rows
     case NAV_SURAH: {
         int s = i + 1;
-        char pct[8];
-        pct_str(khatm_surah_frac(s), pct, sizeof pct);
+        *frac = khatm_surah_frac(s);
         snprintf(idx, ni, "%d", s);
         snprintf(name, nn, "%s", qdb_surah_name(s));
-        if (pct[0]) snprintf(detail, nd, "%d ayat  %s", qdb_ayah_count(s), pct);
-        else        snprintf(detail, nd, "%d ayat", qdb_ayah_count(s));
+        snprintf(detail, nd, "%d ayat", qdb_ayah_count(s));
         *dim = !content_available(s);
         break;
     }
     case NAV_JUZ: {
         int j = i + 1;
         QRef r = qdb_juz_start(j);
-        char pct[8];
-        pct_str(khatm_juz_frac(j), pct, sizeof pct);
+        *frac = khatm_juz_frac(j);
         snprintf(idx, ni, "%d", j);
         snprintf(name, nn, "%s", qdb_surah_name(r.surah));
-        if (pct[0]) snprintf(detail, nd, "p%d  %s", qdb_juz_page(j), pct);
-        else        snprintf(detail, nd, "p%d", qdb_juz_page(j));
+        snprintf(detail, nd, "p%d", qdb_juz_page(j));
         *dim = !content_available(r.surah);
         break;
     }
     case NAV_PAGE: {
         int p = i + 1;
         QRef r = qdb_page_start(p);
-        char pct[8];
-        pct_str(khatm_page_frac(p), pct, sizeof pct);
+        *frac = khatm_page_frac(p);
         snprintf(idx, ni, "%d", p);
         snprintf(name, nn, "%s", qdb_surah_name(r.surah));
-        if (pct[0]) snprintf(detail, nd, "%d:%d  %s", r.surah, r.ayah, pct);
-        else        snprintf(detail, nd, "%d:%d", r.surah, r.ayah);
+        snprintf(detail, nd, "%d:%d", r.surah, r.ayah);
         *dim = !content_available(r.surah);
         break;
     }
@@ -136,7 +163,7 @@ static void row_cols(int i, char *idx, int ni, char *name, int nn,
 
 static void jump_to(int surah, int ayah)
 {
-    player_set_rate(&g_player, g_player.rate > 0 ? g_player.rate : 1.0f);
+    player_set_rate(&g_player, g_prefs.rate);
     player_load(&g_player, surah, ayah);
     scene_switch(SCENE_READER);
 }
@@ -263,17 +290,28 @@ static void on_render(Canvas *c)
         int i = scroll + r;
         int y = LIST_TOP + r * ROW_H;
         bool is_sel = (i == sel), dim = false;
+        float frac = -1.f;
         char idx[8], name[28], detail[16];
         row_cols(i, idx, sizeof(idx), name, sizeof(name),
-                 detail, sizeof(detail), &dim);
+                 detail, sizeof(detail), &dim, &frac);
         if (is_sel) theme_sel_block(c, 0, y, CANVAS_WIDTH, ROW_H - 1);
         color_t nc = is_sel ? THEME_SEL_TEXT : (dim ? THEME_DIM : THEME_TEXT);
         color_t ic = is_sel ? THEME_SEL_TEXT : THEME_LABEL;
         color_t dc = is_sel ? THEME_SEL_TEXT : THEME_DIM;
         if (idx[0]) font_draw_string_right(c, 36, y + 3, &font_small, idx, ic);
         font_draw_string(c, 46, y + 3, &font_small, name, nc);
+        // Right edge: a completion % coloured by how much is read (green done,
+        // gold in progress), with the plain detail to its left.
+        int right = CANVAS_WIDTH - 10;
+        char pct[8] = {0};
+        if (frac >= 0.f) pct_str(frac, pct, sizeof pct);
+        if (pct[0]) {
+            color_t pc = is_sel ? THEME_SEL_TEXT : frac_color(frac);
+            font_draw_string_right(c, right, y + 6, &font_tiny, pct, pc);
+            right -= font_string_width(&font_tiny, pct) + 6;
+        }
         if (detail[0])
-            font_draw_string_right(c, CANVAS_WIDTH - 10, y + 6, &font_tiny, detail, dc);
+            font_draw_string_right(c, right, y + 6, &font_tiny, detail, dc);
     }
 
     // Scrollbar.

@@ -641,7 +641,7 @@ static void on_render(Canvas *c)
         font_draw_string_centered(c, 200, &font_small, "No audio for this ayah",
                                   THEME_DIM);
         font_draw_string_centered(c, 224, &font_tiny,
-                                  "(only Al-Fatihah is bundled)", THEME_DIM);
+                                  "Copy the repo's sdcard/ to the card", THEME_DIM);
         break;
     case TEA_NO_MIC:
         font_draw_string_centered(c, 200, &font_small, "No microphone",
