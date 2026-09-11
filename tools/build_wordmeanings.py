@@ -37,6 +37,8 @@ WORDS_PATH = os.path.join(ROOT, "tools", "quran-tajweed", "quran-uthmani.txt")
 OUT_DIR = os.path.join(ROOT, "sdcard", "quran", "wbw")
 API = "https://api.quran.com/api/v4/verses/by_chapter/{s}?words=true" \
       "&word_translation_language=en&per_page=50&page={p}"
+# quran.com now 403s the default python-urllib user-agent; send a real one.
+HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 # The four basmala words, word-for-word, matching the four leading Uthmani words
 # baked into ayah 1 of surahs 2-114 (except 9).
@@ -69,7 +71,8 @@ def fetch_surah(surah):
         url = API.format(s=surah, p=page)
         for attempt in range(5):
             try:
-                with urllib.request.urlopen(url, timeout=30) as r:
+                req = urllib.request.Request(url, headers=HEADERS)
+                with urllib.request.urlopen(req, timeout=30) as r:
                     data = json.load(r)
                 break
             except Exception as e:  # noqa: BLE001 — retry any transient failure

@@ -250,6 +250,31 @@ static void render_ayah(Canvas *c, int surah, int ayah, int top, int bot, int hl
     arabic_draw_ayah(c, x, y, &g, THEME_TEXT, hl, THEME_ACCENT);
 }
 
+// Draw a gloss into a fixed width: font_small if it fits, else font_tiny, else
+// font_tiny truncated with ".." — real Quran glosses ("of those who go astray")
+// overflow a choice row otherwise.
+static void draw_fit(Canvas *c, int x, int y, int maxw, const char *s, color_t col)
+{
+    if (font_string_width(&font_small, s) <= maxw) {
+        font_draw_string(c, x, y, &font_small, s, col);
+        return;
+    }
+    if (font_string_width(&font_tiny, s) <= maxw) {
+        font_draw_string(c, x, y + 1, &font_tiny, s, col);
+        return;
+    }
+    char buf[80];
+    int len = (int)strlen(s);
+    if (len > (int)sizeof buf - 3) len = (int)sizeof buf - 3;
+    for (; len > 0; len--) {
+        memcpy(buf, s, (size_t)len);
+        buf[len] = '.'; buf[len + 1] = '.'; buf[len + 2] = '\0';
+        if (font_string_width(&font_tiny, buf) <= maxw) break;
+    }
+    if (len <= 0) buf[0] = '\0';
+    font_draw_string(c, x, y + 1, &font_tiny, buf, col);
+}
+
 static void draw_choices(Canvas *c, const TafsirCard *card, int top)
 {
     for (int i = 0; i < card->n_choices; i++) {
@@ -277,7 +302,7 @@ static void draw_choices(Canvas *c, const TafsirCard *card, int top)
         }
         char label[2] = { (char)('A' + i), 0 };
         font_draw_string(c, 30, y + 8, &font_small, label, fg);
-        font_draw_string(c, 52, y + 8, &font_small, tg_choice(card, i), fg);
+        draw_fit(c, 52, y + 8, CANVAS_WIDTH - 20 - 52 - 6, tg_choice(card, i), fg);
     }
 }
 
@@ -345,7 +370,8 @@ static void render_assemble(Canvas *c, const TafsirCard *card, int surah, int ay
             canvas_rect_fill(c, 20, y, CANVAS_WIDTH - 40, 26, ok ? THEME_ACTIVE : THEME_BADGE);
             char n[3]; snprintf(n, sizeof n, "%d", k + 1);
             font_draw_string(c, 28, y + 6, &font_small, n, THEME_SEL_TEXT);
-            font_draw_string(c, 48, y + 6, &font_small, tg_item(card, s_answer[k]), THEME_SEL_TEXT);
+            draw_fit(c, 48, y + 6, CANVAS_WIDTH - 20 - 48 - 6, tg_item(card, s_answer[k]),
+                     THEME_SEL_TEXT);
         }
         KeyChip k2[2] = {
             { "OK", "NEXT", 2, { INPUT_NAV_SELECT, INPUT_ENC_PUSH } },
@@ -382,8 +408,8 @@ static void render_assemble(Canvas *c, const TafsirCard *card, int surah, int ay
             canvas_rect_fill(c, 20, y, CANVAS_WIDTH - 40, 24, THEME_PANEL);
             canvas_rect(c, 20, y, CANVAS_WIDTH - 40, 24, THEME_GRID);
         }
-        font_draw_string(c, 30, y + 5, &font_small, tg_item(card, s_pool[i]),
-                         sel ? THEME_SEL_TEXT : THEME_TEXT);
+        draw_fit(c, 30, y + 5, CANVAS_WIDTH - 20 - 30 - 6, tg_item(card, s_pool[i]),
+                 sel ? THEME_SEL_TEXT : THEME_TEXT);
     }
 
     KeyChip k[4] = {
