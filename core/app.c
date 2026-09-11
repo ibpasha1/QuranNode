@@ -4,6 +4,7 @@
 #include "progress.h"
 #include "khatm.h"
 #include "hifz.h"
+#include "tglearn.h"
 #include "prefs.h"
 #include "theme.h"
 #include "tween.h"
@@ -60,6 +61,7 @@ void app_init(void)
     progress_init();                        // durable resume point + bookmarks
     khatm_init();                           // reading coverage + daily pace
     hifz_init();                            // memorization: portions + review schedule
+    tglearn_init();                         // tafsir game: meaning-review schedule
     player_init(&g_player, "abdulbasit");   // the shared recitation transport
     prefs_init();                           // speed/font/brightness/tajweed (applies them)
     scene_init();   // starts on the calm Home screen
@@ -70,6 +72,7 @@ void app_tick(uint32_t dt_ms)
     tween_update_all((int)dt_ms);
     khatm_service();     // day rollover + throttled coverage saves
     hifz_service();      // day rollover + debounced memorization saves
+    tglearn_service();   // day rollover + debounced tafsir-game saves
     scene_tick(dt_ms);   // e.g. the reader advances its audio playhead + highlight
     backlight_service(dt_ms);   // dim/blank the panel when idle to save the battery
 }

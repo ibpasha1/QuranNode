@@ -20,6 +20,7 @@ typedef enum {
     SCENE_PROGRESS,   // khatm: coverage map, daily pace, what to read today
     SCENE_HIFZ,       // lessons: today's sabaq / sabqi / manzil plan
     SCENE_HIFZ_DRILL, // lessons: the talqeen drill for one portion
+    SCENE_TAFSIR_PLAY,// lessons: the tafsir meaning game (quiz / cloze / assemble)
     SCENE_COUNT,
 } SceneID;
 
