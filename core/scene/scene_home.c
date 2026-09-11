@@ -28,7 +28,7 @@ static const HomeItem ITEMS[] = {
     { "Quran",         ICON_BOOK,   SCENE_NAV },
     { "Progress",      ICON_INFO,   SCENE_PROGRESS },
     { "Lessons",       ICON_NOTE,   SCENE_HIFZ },
-    { "Quran Teacher", ICON_WAVE,   SCENE_TEACHER },
+    { "Recite",        ICON_WAVE,   SCENE_TEACHER },
     { "Practice",      ICON_REPEAT, SCENE_LOOP },
     { "Library",       ICON_FOLDER, SCENE_LIBRARY },
     { "Settings",      ICON_GEAR,   SCENE_SETTINGS },
@@ -42,7 +42,9 @@ static void resume_into_reader(void)
 {
     ResumePoint r = progress_has_resume() ? progress_resume()
                                           : (ResumePoint){ 1, 1, 1.0f };
-    player_set_rate(&g_player, r.rate > 0 ? r.rate : 1.0f);
+    // Speed follows the current Settings preference, not the rate captured in
+    // the resume point (which is stale once the user edits it in Settings).
+    player_set_rate(&g_player, g_prefs.rate);
     player_load(&g_player, r.surah, r.ayah);
     scene_switch(SCENE_READER);
 }
@@ -122,13 +124,53 @@ static void on_render(Canvas *c)
     canvas_progress_bar(c, hx + 14, hy + 66, hw - 28, 5, sfrac,
                         THEME_ACCENT, THEME_GRID);
 
-    char foot[44];
-    if (k->have_day && k->streak > 0)
-        snprintf(foot, sizeof(foot), "%.0f of 604 pages   ·   %d %s streak",
-                 (double)k->pages, k->streak, k->streak == 1 ? "day" : "days");
-    else
+    // Foot: today's goal — the "what do I do now to stay on track" cue. Mirrors
+    // the pace maths the Progress scene shows (quota vs. read-today, ± vs. the
+    // straight-line plan). Falls back to whole-mushaf progress / a goal nudge
+    // when there's no daily target to speak of.
+    char foot[48];
+    color_t fc = THEME_LABEL;
+    if (!k->have_day) {
         snprintf(foot, sizeof(foot), "%.0f of 604 pages", (double)k->pages);
-    font_draw_string_centered(c, hy + 78, &font_tiny, foot, THEME_LABEL);
+    } else if (k->complete) {
+        snprintf(foot, sizeof(foot), "Khatm complete");
+        fc = THEME_ACTIVE;
+    } else if (!k->have_goal) {
+        snprintf(foot, sizeof(foot), "Set a daily goal in Progress");
+        fc = THEME_ACCENT;
+    } else if (k->overdue) {
+        snprintf(foot, sizeof(foot), "Behind schedule - extend goal");
+        fc = THEME_BADGE;
+    } else {
+        // Name the scope for a narrowed goal ("Juz 30", "Al-Baqarah") so the
+        // cue reads as this goal, not the whole mushaf. Whole-Quran goals keep
+        // the plain "Today:" wording.
+        char scope[20] = "";
+        if (k->scope_from_page > 1 || k->scope_to_page < QDB_PAGE_COUNT)
+            khatm_scope_name(k->scope_from_page, k->scope_to_page, scope,
+                             sizeof(scope));
+        uint32_t owed = k->quota_mpages > k->today_mpages
+                      ? k->quota_mpages - k->today_mpages : 0;
+        if (owed == 0) {
+            if (scope[0])
+                snprintf(foot, sizeof(foot), "%s  ·  today's goal met", scope);
+            else if (k->streak > 0)
+                snprintf(foot, sizeof(foot), "Today's goal met  ·  %d %s streak",
+                         k->streak, k->streak == 1 ? "day" : "days");
+            else
+                snprintf(foot, sizeof(foot), "Today's goal met");
+            fc = THEME_ACTIVE;
+        } else {
+            bool behind = k->delta_mpages <= -1000;
+            char lead[24];
+            if (scope[0]) snprintf(lead, sizeof(lead), "%s: ", scope);
+            else          snprintf(lead, sizeof(lead), "Today: ");
+            snprintf(foot, sizeof(foot), "%s%.1f pg left  ·  %s",
+                     lead, (double)owed / 1000.0, behind ? "behind" : "on track");
+            fc = behind ? THEME_BADGE : THEME_ACTIVE;
+        }
+    }
+    font_draw_string_centered(c, hy + 78, &font_tiny, foot, fc);
 
     // --- Next prayer strip ---------------------------------------------------
     const int py = 132, ph = 22;
