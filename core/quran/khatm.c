@@ -143,6 +143,86 @@ static int count_range(int g0, int g1)
 }
 
 // -------------------------------------------------------------------------
+// Goal scope. A goal targets an inclusive window of mushaf pages; the window
+// is packed into KhatmGoal.reserved as (to<<16)|from. Zero — the all-bits-zero
+// default every old save already carries — means the whole Quran, so the
+// legacy "finish everything by date X" goals keep working with no migration.
+// -------------------------------------------------------------------------
+static void goal_scope(int *p0, int *p1)
+{
+    uint32_t s = s_b.goal.reserved;
+    if (s == 0) { *p0 = 1; *p1 = KHATM_TOTAL_PAGES; return; }
+    *p0 = (int)(s & 0xFFFFu);
+    *p1 = (int)(s >> 16);
+}
+
+static uint32_t pack_scope(int p0, int p1)
+{
+    if (p0 <= 1 && p1 >= KHATM_TOTAL_PAGES) return 0;   // whole Quran == default
+    return ((uint32_t)p1 << 16) | (uint32_t)p0;
+}
+
+// Milli-pages read within [p0, p1]. Mirrors recount()'s per-page sum so a
+// whole-Quran scope yields exactly s_b.read_mpages.
+static uint32_t scope_read_mp(int p0, int p1)
+{
+    uint32_t mp = 0;
+    for (int p = p0; p <= p1; p++)
+        mp += mp_of(page_read_count(p), qdb_page_ayah_count(p));
+    return mp;
+}
+
+uint32_t khatm_scope_read_mpages(int from_page, int to_page)
+{
+    if (from_page < 1) from_page = 1;
+    if (to_page > KHATM_TOTAL_PAGES) to_page = KHATM_TOTAL_PAGES;
+    if (from_page > to_page) return 0;
+    return scope_read_mp(from_page, to_page);
+}
+
+bool khatm_surah_page_range(int surah, int *from_page, int *to_page)
+{
+    int n = qdb_ayah_count(surah);
+    if (n <= 0) return false;
+    int p0 = qdb_page_of(surah, 1);
+    int p1 = qdb_page_of(surah, n);
+    if (p0 < 1 || p1 < 1) return false;
+    if (from_page) *from_page = p0;
+    if (to_page)   *to_page   = p1;
+    return true;
+}
+
+bool khatm_juz_page_range(int juz, int *from_page, int *to_page)
+{
+    if (juz < 1 || juz > QDB_JUZ_COUNT) return false;
+    int p0 = qdb_juz_page(juz);
+    int p1 = (juz == QDB_JUZ_COUNT) ? KHATM_TOTAL_PAGES : qdb_juz_page(juz + 1) - 1;
+    if (p0 < 1 || p1 < p0) return false;
+    if (from_page) *from_page = p0;
+    if (to_page)   *to_page   = p1;
+    return true;
+}
+
+void khatm_scope_name(int p0, int p1, char *buf, int n)
+{
+    if (!buf || n <= 0) return;
+    if (p0 <= 1 && p1 >= KHATM_TOTAL_PAGES) { snprintf(buf, n, "Whole Quran"); return; }
+    for (int j = 1; j <= QDB_JUZ_COUNT; j++) {
+        int a, b;
+        if (khatm_juz_page_range(j, &a, &b) && a == p0 && b == p1) {
+            snprintf(buf, n, "Juz %d", j); return;
+        }
+    }
+    for (int s = 1; s <= QDB_SURAH_COUNT; s++) {
+        int a, b;
+        if (khatm_surah_page_range(s, &a, &b) && a == p0 && b == p1) {
+            snprintf(buf, n, "%s", qdb_surah_name(s)); return;
+        }
+    }
+    snprintf(buf, n, "Pages %d-%d", p0, p1);
+}
+
+// -------------------------------------------------------------------------
 // Day index. The computation lives in qday.c because hifz needs it too; khatm
 // keeps a *cached* day (refreshed in khatm_service) while qday_today() is the
 // live read — that distinction matters, so the two are not interchangeable.
@@ -505,42 +585,58 @@ const KhatmStats *khatm_stats(void)
 
     if (s_b.goal.start_day == 0) return k;   // no goal: pace stats only
 
-    k->have_goal    = true;
+    // The goal targets a page window; a whole-Quran goal is just pages 1..604.
+    // Everything below is measured INSIDE that window rather than over the whole
+    // mushaf — which is the only change that turns "finish the Quran" into
+    // "finish this surah". The odometer and ETA above stay whole-mushaf.
+    int gp0, gp1;
+    goal_scope(&gp0, &gp1);
+    uint32_t scope_span = (uint32_t)(gp1 - gp0 + 1) * 1000u;
+    uint32_t sread = scope_read_mp(gp0, gp1);
+    uint32_t goal_remaining = scope_span > sread ? scope_span - sread : 0;
+
+    k->have_goal         = true;
+    k->scope_from_page   = gp0;
+    k->scope_to_page     = gp1;
+    k->scope_mpages      = scope_span;
+    k->scope_read_mpages = sread;
+    k->scope_percent     = scope_span ? (float)sread * 100.f / (float)scope_span : 100.f;
+    k->scope_complete    = sread >= scope_span;
+
     k->days_elapsed = s_cur_day - (int)s_b.goal.start_day + 1;
     if (k->days_elapsed < 1) k->days_elapsed = 1;
     int left = (int)s_b.goal.target_day - s_cur_day;
     k->days_left = left > 0 ? left : 0;
-    k->overdue   = left < 0 && !k->complete;
+    k->overdue   = left < 0 && !k->scope_complete;
 
-    // The original straight-line rate the goal implied.
+    // The original straight-line rate the goal implied, over the scope.
     int total_days = (int)s_b.goal.target_day - (int)s_b.goal.start_day + 1;
     if (total_days < 1) total_days = 1;
-    uint32_t plan_span = KHATM_TOTAL_MPAGES > s_b.goal.start_mpages
-                       ? KHATM_TOTAL_MPAGES - s_b.goal.start_mpages : 0;
+    uint32_t plan_span = scope_span > s_b.goal.start_mpages
+                       ? scope_span - s_b.goal.start_mpages : 0;
     uint32_t per_day = plan_span / (uint32_t)total_days;
 
     // Re-deriving the quota from what's actually left IS the ahead/behind
-    // mechanism: get ahead and remaining shrinks faster than the days do, so
-    // tomorrow asks for less. Fall behind and it asks for more.
+    // mechanism: get ahead and the scope's remainder shrinks faster than the
+    // days do, so tomorrow asks for less. Fall behind and it asks for more.
     if (k->overdue) {
         // Past the deadline there are no days left to divide by, and dividing
-        // by the clamped 1 would demand the entire rest of the Quran today.
-        // Keep asking for the original daily amount until the user extends or
-        // re-plans — the goal card prompts them to.
+        // by the clamped 1 would demand the whole scope today. Keep asking for
+        // the original daily amount until the user extends or re-plans.
         k->quota_mpages = per_day ? per_day : KHATM_STREAK_MPAGES;
     } else {
         uint32_t denom = (uint32_t)left + 1;
-        k->quota_mpages = (remaining + denom - 1) / denom;
+        k->quota_mpages = (goal_remaining + denom - 1) / denom;
     }
-    if (k->quota_mpages > remaining) k->quota_mpages = remaining;
+    if (k->quota_mpages > goal_remaining) k->quota_mpages = goal_remaining;
 
-    // Narrative delta: where the original straight-line plan said you'd be.
-    // Counts COMPLETED days only — today is still in progress, so being told
-    // you're a day behind before the day is over would just be wrong.
+    // Narrative delta: where the original straight-line plan said you'd be
+    // within the scope. Counts COMPLETED days only — today is still in progress,
+    // so being told you're a day behind before the day is over would be wrong.
     uint32_t expected = s_b.goal.start_mpages +
                         per_day * (uint32_t)(k->days_elapsed - 1);
-    if (expected > KHATM_TOTAL_MPAGES) expected = KHATM_TOTAL_MPAGES;
-    k->delta_mpages = (int32_t)s_b.read_mpages - (int32_t)expected;
+    if (expected > scope_span) expected = scope_span;
+    k->delta_mpages = (int32_t)sread - (int32_t)expected;
 
     return k;
 }
@@ -567,18 +663,31 @@ const KhatmPlan *khatm_today_plan(void)
     const KhatmStats *k = khatm_stats();
     if (k->complete) return pl;
 
-    // Start from where the reader left off, then walk to the first page that
-    // still has unread ayat, wrapping once at the end of the mushaf.
-    int p0 = 1;
+    // The plan never sends you outside the goal's page window — finishing a
+    // surah goal shouldn't queue the next surah. A whole-Quran goal (or none)
+    // spans 1..604, so this reduces to the old full-mushaf walk.
+    int lo = 1, hi = KHATM_TOTAL_PAGES;
+    if (s_b.goal.start_day) goal_scope(&lo, &hi);
+    int span_pages = hi - lo + 1;
+
+    // Nothing left in scope => nothing to read (the goal is done).
+    bool any_unread = false;
+    for (int p = lo; p <= hi; p++)
+        if (page_read_count(p) < qdb_page_ayah_count(p)) { any_unread = true; break; }
+    if (!any_unread) return pl;
+
+    // Start from where the reader left off (if that's inside the scope), then
+    // walk to the first page that still has unread ayat, wrapping within scope.
+    int p0 = lo;
     if (progress_has_resume()) {
         ResumePoint r = progress_resume();
         int p = qdb_page_of(r.surah, r.ayah);
-        if (p > 0) p0 = p;
+        if (p >= lo && p <= hi) p0 = p;
     }
     int start = p0;
-    for (int i = 0; i < KHATM_TOTAL_PAGES; i++) {
+    for (int i = 0; i < span_pages; i++) {
         int p = start + i;
-        if (p > KHATM_TOTAL_PAGES) { p -= KHATM_TOTAL_PAGES; pl->wrapped = true; }
+        if (p > hi) { p -= span_pages; pl->wrapped = true; }
         if (page_read_count(p) < qdb_page_ayah_count(p)) { p0 = p; break; }
     }
 
@@ -591,12 +700,12 @@ const KhatmPlan *khatm_today_plan(void)
 
     uint32_t got = 0;
     int p = p0, last = p0;
-    for (int i = 0; i < KHATM_TOTAL_PAGES && got < need; i++) {
+    for (int i = 0; i < span_pages && got < need; i++) {
         int n = qdb_page_ayah_count(p);
         uint32_t unread = 1000 - mp_of(page_read_count(p), n);
         got += unread;
         last = p;
-        if (++p > KHATM_TOTAL_PAGES) { p = 1; pl->wrapped = true; }
+        if (++p > hi) { p = lo; pl->wrapped = true; }
     }
 
     pl->from_page = p0;
@@ -622,17 +731,30 @@ const KhatmPlan *khatm_today_plan(void)
 // -------------------------------------------------------------------------
 KhatmGoal khatm_goal(void) { return s_b.goal; }
 
-void khatm_set_goal_days(int days)
+static void set_goal(int p0, int p1, int days)
 {
     if (s_cur_day <= 0) return;   // a deadline needs a calendar
+    if (p0 < 1) p0 = 1;
+    if (p1 > KHATM_TOTAL_PAGES) p1 = KHATM_TOTAL_PAGES;
+    if (p0 > p1) return;
     if (days < 1) days = 1;
     if (days > 3650) days = 3650;
     s_b.goal.start_day    = (uint16_t)s_cur_day;
     s_b.goal.target_day   = (uint16_t)(s_cur_day + days - 1);
-    s_b.goal.start_mpages = s_b.read_mpages;
+    s_b.goal.reserved     = pack_scope(p0, p1);
+    // Baseline is the coverage of THIS scope, so the pace/delta math measures
+    // progress inside the window rather than against the whole mushaf.
+    s_b.goal.start_mpages = scope_read_mp(p0, p1);
     s_b.goal.last_days    = (uint16_t)days;
     s_goal_seq++;
     persist();
+}
+
+void khatm_set_goal_days(int days) { set_goal(1, KHATM_TOTAL_PAGES, days); }
+
+void khatm_set_goal_pages(int from_page, int to_page, int days)
+{
+    set_goal(from_page, to_page, days);
 }
 
 void khatm_extend_goal(int days)
@@ -682,6 +804,7 @@ void khatm_reset_coverage(void)
         s_b.goal.start_day    = (uint16_t)s_cur_day;
         s_b.goal.target_day   = (uint16_t)(s_cur_day + days - 1);
         s_b.goal.start_mpages = 0;
+        s_b.goal.reserved     = 0;   // a fresh khatm is the whole mushaf again
     }
     memset(&s_focus, 0, sizeof s_focus);
     s_cov_seq++;

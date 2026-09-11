@@ -393,6 +393,105 @@ int main(void)
           khatm_stats()->streak);
     CHECK(khatm_goal().start_day != 0, "reset dropped the goal window");
 
+    // =====================================================================
+    printf("-- a scoped goal measures pace inside its window --\n");
+    store_reset();
+    g_epoch = DAY(20000);
+    khatm_init();
+    s_has_resume = false;
+    // Scope to juz 30 — a clean multi-page window at the end of the mushaf.
+    int jp0 = 0, jp1 = 0;
+    CHECK(khatm_juz_page_range(30, &jp0, &jp1), "juz 30 range unresolved");
+    CHECK(jp1 == QDB_PAGE_COUNT, "juz 30 should end at the last page, got %d", jp1);
+    int jpages = jp1 - jp0 + 1;
+    khatm_set_goal_pages(jp0, jp1, 10);
+    const KhatmStats *ks = khatm_stats();
+    CHECK(ks->have_goal, "scoped goal not registered");
+    CHECK(ks->scope_from_page == jp0 && ks->scope_to_page == jp1,
+          "scope window = %d..%d, expected %d..%d",
+          ks->scope_from_page, ks->scope_to_page, jp0, jp1);
+    CHECK(ks->scope_mpages == (uint32_t)jpages * 1000,
+          "scope span = %u, expected %d", (unsigned)ks->scope_mpages, jpages * 1000);
+    CHECK(ks->scope_read_mpages == 0, "fresh scope should read 0");
+    CHECK(!ks->scope_complete, "empty scope reported complete");
+    // Day-1 quota is the scope's span over its days — a fraction of the
+    // whole-mushaf quota, which is the whole point.
+    uint32_t sq = ks->quota_mpages;
+    CHECK(sq < 5000, "scoped quota %u looks whole-mushaf sized", (unsigned)sq);
+    CHECK(sq > (uint32_t)jpages * 100 - 300 && sq < (uint32_t)jpages * 100 + 300,
+          "scoped day-1 quota = %u, expected ~%d", (unsigned)sq, jpages * 100);
+    // Reading OUTSIDE the window advances the odometer but not the goal.
+    khatm_mark_pages(1, 5);
+    CHECK(khatm_stats()->scope_read_mpages == 0,
+          "out-of-scope reading counted toward the goal");
+    CHECK(khatm_stats()->read_mpages > 0, "odometer should still move");
+    CHECK(!khatm_stats()->scope_complete, "goal completed by out-of-scope reading");
+    // Filling the window completes the goal — but not the whole khatm.
+    khatm_mark_pages(jp0, jp1);
+    ks = khatm_stats();
+    CHECK(ks->scope_read_mpages == ks->scope_mpages, "scope not fully credited");
+    CHECK(ks->scope_complete, "filled scope not reported complete");
+    CHECK(!ks->complete, "a juz-sized goal wrongly completed the whole mushaf");
+    CHECK(!ks->overdue, "a completed scope must not read as overdue");
+
+    // =====================================================================
+    printf("-- a scoped plan never leaves its window --\n");
+    store_reset();
+    g_epoch = DAY(20000);
+    khatm_init();
+    s_has_resume = false;
+    int sp0 = 0, sp1 = 0;
+    CHECK(khatm_surah_page_range(2, &sp0, &sp1), "surah 2 range unresolved");
+    khatm_set_goal_pages(sp0, sp1, 30);
+    const KhatmPlan *spl = khatm_today_plan();
+    CHECK(spl->from_page >= sp0 && spl->to_page <= sp1,
+          "scoped plan %d..%d escaped window %d..%d",
+          spl->from_page, spl->to_page, sp0, sp1);
+    CHECK(spl->from_page == sp0, "scoped plan should open at page %d, got %d",
+          sp0, spl->from_page);
+    // With a gentle deadline and all but the last page done, the plan should
+    // sit on exactly that page instead of wrapping to the window's start.
+    store_reset();
+    g_epoch = DAY(20000);
+    khatm_init();
+    s_has_resume = false;
+    khatm_set_goal_pages(sp0, sp1, 300);
+    khatm_mark_pages(sp0, sp1 - 1);
+    spl = khatm_today_plan();
+    CHECK(spl->from_page == sp1 && spl->to_page == sp1,
+          "plan should land on the last in-window page %d, got %d..%d",
+          sp1, spl->from_page, spl->to_page);
+    // Fill the window: the plan goes empty even though the mushaf is unfinished.
+    khatm_mark_pages(sp0, sp1);
+    CHECK(khatm_today_plan()->from_page == 0,
+          "completed scope still produced a plan");
+    CHECK(!khatm_stats()->complete, "surah scope wrongly completed the mushaf");
+
+    // =====================================================================
+    printf("-- a whole-Quran goal and an explicit 1..604 goal agree --\n");
+    store_reset();
+    g_epoch = DAY(20000);
+    khatm_init();
+    khatm_set_goal_days(30);
+    uint32_t whole_q = khatm_stats()->quota_mpages;
+    CHECK(khatm_stats()->scope_from_page == 1 &&
+          khatm_stats()->scope_to_page == QDB_PAGE_COUNT,
+          "legacy goal scope = %d..%d, expected 1..%d",
+          khatm_stats()->scope_from_page, khatm_stats()->scope_to_page,
+          QDB_PAGE_COUNT);
+    CHECK(khatm_goal().reserved == 0, "whole-Quran goal should pack scope as 0");
+    // The zero default is exactly what an old save carries: reload proves the
+    // migration is a no-op.
+    khatm_flush();
+    khatm_init();
+    CHECK(khatm_stats()->scope_to_page == QDB_PAGE_COUNT,
+          "reloaded legacy goal lost its whole-mushaf scope");
+    khatm_set_goal_pages(1, QDB_PAGE_COUNT, 30);
+    CHECK(khatm_goal().reserved == 0,
+          "explicit full-range goal should collapse to the zero default");
+    CHECK(khatm_stats()->quota_mpages == whole_q,
+          "explicit full-range goal disagreed with the legacy path");
+
     if (fails == 0) printf("\nkhatm-test: all checks passed\n");
     else            printf("\nkhatm-test: %d FAILURES\n", fails);
     return fails != 0;

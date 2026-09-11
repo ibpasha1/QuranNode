@@ -79,6 +79,15 @@ typedef struct {
     int32_t  delta_mpages;    // + ahead of schedule, - behind
     int      eta_day;         // projected finish (day index), 0 = unknown
 
+    // The goal's scope. A goal targets a window of mushaf pages; a whole-Quran
+    // goal is just the widest window (pages 1..604). quota/delta/days_* above
+    // are all relative to this scope, not the whole mushaf.
+    int      scope_from_page, scope_to_page;   // inclusive; valid when have_goal
+    uint32_t scope_mpages;        // span of the scope (pages * 1000)
+    uint32_t scope_read_mpages;   // read within the scope so far
+    float    scope_percent;       // 0 .. 100 within the scope
+    bool     scope_complete;      // the scope is fully read (the goal is done)
+
     bool     complete;        // the whole mushaf is read
     int      khatms_done;
 } KhatmStats;
@@ -122,10 +131,26 @@ const KhatmStats *khatm_stats(void);
 const KhatmPlan  *khatm_today_plan(void);
 
 // --- Goal -----------------------------------------------------------------
-void khatm_set_goal_days(int days);   // finish in N days from today
+// A goal is "read this page window by this date". khatm_set_goal_days is the
+// whole-Quran case (pages 1..604); khatm_set_goal_pages narrows it. Scope is
+// snapped to whole mushaf pages, so a surah/juz pulls in its boundary pages —
+// resolve those page ranges with the helpers below.
+void khatm_set_goal_days(int days);                          // whole Quran in N days
+void khatm_set_goal_pages(int from_page, int to_page, int days);
 void khatm_extend_goal(int days);     // push the target back (overdue rescue)
 void khatm_clear_goal(void);
 KhatmGoal khatm_goal(void);
+
+// Resolve a surah / juz to the inclusive page window that contains it. Returns
+// false (and leaves the outputs untouched) for an out-of-range index.
+bool khatm_surah_page_range(int surah, int *from_page, int *to_page);
+bool khatm_juz_page_range(int juz, int *from_page, int *to_page);
+// Milli-pages already read within a page window — for previewing a goal before
+// it's set (the editor shows pages/day for the dialled-in scope).
+uint32_t khatm_scope_read_mpages(int from_page, int to_page);
+// Human name for a page window: "Whole Quran" / "Juz 30" / "Al-Baqarah" / a raw
+// "Pages 3-9" when it matches no single surah or juz.
+void khatm_scope_name(int from_page, int to_page, char *buf, int n);
 
 // --- Bulk edits -----------------------------------------------------------
 // Mark a page range read WITHOUT crediting it to today — used by the first-run
