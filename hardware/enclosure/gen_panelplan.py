@@ -68,7 +68,7 @@ ctext(fv.px(P.SCR_CX),fv.py(P.SCR_CY),'3.5"\n480x320\nST7796S',GRN,15)
 fv.rect(P.DPAD_CX,P.DPAD_CY,P.DPAD_W,P.DPAD_H, outline=COMP, width=1)
 # nav: SQUARE opening sized to the 9.9mm switch body (+clr); body noses up thru lid
 _navsw = P.NAV_SW + 2*P.NAV_SW_CLR
-fv.rrect(P.NAV_CX,P.NAV_CY,_navsw,_navsw,int(1.0*S), outline=ACC, fill=CUT, width=3)
+fv.rrect(P.NAV_CX,P.NAV_CY,_navsw,_navsw,int(P.NAV_SW_R*S), outline=ACC, fill=CUT, width=3)
 fv.rrect(P.NAV_CX,P.NAV_CY,P.NAV_SW,P.NAV_SW,int(0.8*S), outline=DIM, width=1)
 ctext(fv.px(P.NAV_CX),fv.py(P.NAV_CY),"NAV",ACC,9)
 # SET/RST tactiles are covered (no cutouts) -- D-pad only

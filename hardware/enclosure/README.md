@@ -42,20 +42,21 @@ Edit dimensions/layout **only in `params.py`**, then rerun all three.
 **FRONT (lid):**
 - **3.5" ST7796S** screen, **flush-mounted**: cover glass sits coplanar with the
   lid top via a stepped rabbet. Module PCB/glass **55.6 × 91** (MEASURED — PCB and
-  glass are the same width), **window 54 × 88** (kept *under* the module width so the
-  inner lip overlaps the glass ~0.8 mm/side and retains it — a 57 mm window was wider
-  than the module and wouldn't hold it). Active lit area 49 × 74 sits inset inside
-  the 55.6 glass, fully clear of the window. Centred high at Y=104.
+  glass are the same width), **window 55.5 × 88** so the full glass fits (a 54 mm
+  window clipped it). The side lip is ~0, so front retention is the **top/bottom lip**
+  (module 91 vs window 88 = 1.5 mm each) plus the flush-mount bond. Centred at Y=101
+  (lowered 3 mm so the recess clears the top snap-lip; recess top ~147.5 vs lip ~149.6).
 - **D-pad** below the screen (MEASURED board **40.7 × 24.8 mm landscape**), centred at
-  (32, 27). **Integrated into the lid**: the 5-way switch is a **9.9 mm square, 3.9 mm
+  (32, 25). **Integrated into the lid**: the 5-way switch is a **9.9 mm square, 3.9 mm
   tall** body (~centred on the board), and the NAV opening is a matching **square
-  10.4 mm** (`NAV_SW` + clearance) so the body noses **up through the lid** and the
+  11.0 mm** (`NAV_SW` + clearance, near-sharp 0.5 mm corners) so the body noses **up
+  through the lid** and the
   actuator protrudes — snug around the square body (no sloppy round gap). The PCB seats
   near the inner face, cavity intrusion **~2.7 mm** (`T_DPAD`). Board mounts **FLAT
   against the lid** (component side up), centred by the switch body in the opening and
   **taped** (no locating pegs). **SET/RST covered.**
 - **Mic** — INMP441 (14 × 14 mm), earpiece-style 7-hole grille at the **far left**,
-  just above the D-pad's top-left corner (centred at X=10, Y=48); board **taped**
+  just above the D-pad's top-left corner (centred at X=10, Y=46); board **taped**
   under the grille, port toward the front (no locating pegs). (Can't sit directly
   *beside* the D-pad — the 41 mm board leaves only ~13 mm of left margin, narrower
   than the mic board.)
@@ -120,19 +121,19 @@ tape to the floor) stays as before, just at the new coordinates.
 ## ⚠️ Verify before a final print
 
 1. **Screen window** — module PCB/glass **`SCR_MOD_W/H` = 55.6 × 91** (MEASURED);
-   **window `SCR_GLASS_W/H` = 54 × 88 is deliberately < the module width** so the lip
-   retains it (~0.8 mm overlap/side). Keep the window *under* `SCR_MOD_W` but *over*
-   the active `SCR_ACT_W` (49) — verify your panel's real active width if it differs.
-   Confirm `SCR_BODY_T` (module depth) and ribbon reach. Touch (cap) lines not routed.
+   **window `SCR_GLASS_W/H` = 55.5 × 88** so the glass fits. Width lip is ~0, so the
+   module is held front-to-back by the **top/bottom lip** (91 vs 88) + the flush bond —
+   confirm that's enough grip, or trade a little glass back for a side lip. Confirm
+   `SCR_BODY_T` (module depth) and ribbon reach. Touch (cap) lines not routed.
 2. **Mic** — INMP441 is top-ported; mount the board port-toward-the-lid under the
-   grille at (10, 48), taped to the lid (no pegs). Check the 14 mm board clears the
+   grille at (10, 46), taped to the lid (no pegs). Check the 14 mm board clears the
    left wall (~2 mm) and the D-pad board below it.
 3. **Nav opening / integrated D-pad** — square `NAV_SW` (9.9 mm) + `NAV_SW_CLR`
-   (0.25/side) = 10.4 mm opening clears the measured square switch body so it noses up
-   through the lid and the actuator protrudes and still tilts. `NAV_SW_H` (3.9 mm) sets
-   how far the switch reaches — with the actuator ~1 mm proud the PCB seats ~1 mm below
-   the inner face (`T_DPAD` ≈ 2.7). Tune `NAV_SW_CLR` to your print (0.25 mm is snug).
-   Solder **wires / a flat or right-angle header** (no tall pins) so the board
+   (0.55/side) = 11.0 mm opening with near-sharp corners (`NAV_SW_R` 0.5 mm) so the
+   square switch body actually seats (a 1 mm corner radius pinched the corners). The
+   body noses up through the lid, actuator protrudes and tilts. `NAV_SW_H` (3.9 mm):
+   with the actuator ~1 mm proud the PCB seats ~1 mm below the inner face (`T_DPAD`
+   ≈ 2.7). Solder **wires / a flat or right-angle header** (no tall pins) so the board
    lays flat. Verify the actuator dia and that it tilts freely in the square opening.
 4. **Port heights** (`zrel` per port; default floor+3.2, **HP = 4.7**). Verify
    against real connectors. Rev F I/O: **microSD out the TOP edge**; **USB-C +

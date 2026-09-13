@@ -36,11 +36,11 @@ TOTAL_D = INNER_D + FLOOR_T + TOP_T   # 17.8  (overall thickness)
 
 # ----------------------------------------------------------------- SCREEN
 # 3.5" 480x320 ST7796S SPI cap-touch module ("Openslive Yosek" V1.0), near the top.
-SCR_CX, SCR_CY   = 32.0, 104.0       # module + window centre (Rev F: high, near top)
+SCR_CX, SCR_CY   = 32.0, 101.0       # module + window centre (lowered 3 mm off the top lip)
 SCR_MOD_W, SCR_MOD_H = 55.6, 91.0    # module PCB / glass outline (PCB == glass width, MEASURED)
 SCR_ACT_W, SCR_ACT_H = 49.0, 74.0    # active (lit) glass area (=320px x 480px, inset in the 55.6 glass)
-SCR_GLASS_W, SCR_GLASS_H = 54.0, 88.0  # lid window opening -- < MOD_W so the lip catches the module
-                                       # (0.8 mm lip/side onto the glass; still clears the 49 mm active)
+SCR_GLASS_W, SCR_GLASS_H = 55.5, 88.0  # lid window opening -- 55.5 so the full glass fits (MEASURED);
+                                       # side lip ~0, so the TOP/BOTTOM lip (91 vs 88 = 1.5 mm) retains it
 SCR_BODY_T       = 4.3               # glass-top -> module back
 SCR_GLASS_STACK  = 3.0               # glass-top -> module PCB front (flush-mount seat depth)
 SCR_RECESS_CLR   = 1.0               # per-side clearance for the module-nesting rabbet
@@ -53,17 +53,18 @@ SCR_RECESS_CLR   = 1.0               # per-side clearance for the module-nesting
 # THROUGH the lid via a SQUARE NAV opening so the PCB seats close to the inner face;
 # the actuator protrudes to press/tilt. SET/RST buttons stay covered.
 DPAD_W, DPAD_H     = 40.7, 24.8      # board outline (X, Y) -- landscape (MEASURED)
-DPAD_CX, DPAD_CY   = 32.0, 27.0      # board centre (switch ~centred -> board centres on NAV)
-NAV_CX, NAV_CY     = 32.0, 27.0      # 5-way switch centre
+DPAD_CX, DPAD_CY   = 32.0, 25.0      # board centre (switch ~centred -> board centres on NAV)
+NAV_CX, NAV_CY     = 32.0, 25.0      # 5-way switch centre
 NAV_SW             = 9.9             # switch BODY, square (MEASURED)
 NAV_SW_H           = 3.9             # switch total height off the PCB (MEASURED)
-NAV_SW_CLR         = 0.25            # per-side clearance -> square NAV opening = 10.4 mm
+NAV_SW_CLR         = 0.55            # per-side clearance -> square NAV opening = 11.0 mm
+NAV_SW_R           = 0.5             # opening corner radius (small -> stays square for the square switch)
 NAV_D              = 9.5             # actuator/knob dia (protrudes through the opening) [VERIFY]
 # SET/RST tactiles are COVERED (no lid holes) -- only the 5-way D-pad is exposed.
 # (D-pad locating pegs removed -- the switch body in the NAV opening locates it.)
 
 # ----------------------------------------------------------------- MICROPHONE (INMP441)
-MIC_CX, MIC_CY     = 10.0, 48.0      # board + grille centre -- FAR LEFT, just above the D-pad
+MIC_CX, MIC_CY     = 10.0, 46.0      # board + grille centre -- FAR LEFT, just above the D-pad
 MIC_BOARD          = 14.0            # square board edge
 MIC_GRILLE_D       = 6.0             # grille pattern envelope
 MIC_HOLE_D         = 1.1             # individual port holes

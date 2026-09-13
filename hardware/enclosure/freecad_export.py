@@ -209,7 +209,7 @@ def build_lid():
     # noses UP through the lid and the actuator protrudes; PCB seats near the inner
     # face. Rounded corners for printability.
     _sw = P.NAV_SW + 2*P.NAV_SW_CLR
-    tools.append(rrect(_sw, _sw, hZ, 1.0, (P.NAV_CX - _sw/2, P.NAV_CY - _sw/2, zc)))
+    tools.append(rrect(_sw, _sw, hZ, P.NAV_SW_R, (P.NAV_CX - _sw/2, P.NAV_CY - _sw/2, zc)))
     tools += mic_grille(zc, hZ)                                        # INMP441 mic grille
     # flush screen mount: fuse ledge, then cut the glass opening + all holes
     adds, dcuts = screen_features()
