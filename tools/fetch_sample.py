@@ -18,11 +18,16 @@ import json
 import os
 import struct
 import subprocess
+import urllib.error
 import urllib.request
 
 RECITER_ID = 2                      # AbdulBaset AbdulSamad, Murattal
 RECITER_DIR = "abdulbasit"
 QDC = "https://api.qurancdn.com/api/qdc/audio/reciters/{rid}/audio_files?chapter={ch}&segments=true"
+# Same Abdul Basit Murattal recording, pre-cut per ayah from the master the qdc
+# segment timeline was built against — the fallback when the CDN's full-surah
+# file has been swapped out from under its own timings (see process_surah).
+EVERYAYAH = "https://everyayah.com/data/Abdul_Basit_Murattal_192kbps/{s:03d}{a:03d}.mp3"
 
 # Surahs to fetch audio + timings for. Al-Fatihah (1) stays for the no-SD fallback;
 # Juz Amma (78-114) is the first real SD content. Each whole surah is fetched;
@@ -54,6 +59,21 @@ def _download(url, path):
         f.write(r.read())
 
 
+def _download_force(url, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    print(f"  download {url}")
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req) as r, open(path, "wb") as f:
+        f.write(r.read())
+
+
+def _duration_ms(path):
+    out = subprocess.check_output(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", path])
+    return int(float(out) * 1000)
+
+
 def _slice(full_mp3, start_ms, end_ms, out_mp3):
     os.makedirs(os.path.dirname(out_mp3), exist_ok=True)
     # Stream-copy (no re-encode): -ss/-to before -i, -c copy. Avoids an
@@ -74,6 +94,19 @@ def process_surah(surah):
     full_mp3 = os.path.join(CACHE, f"{RECITER_DIR}_{surah}.mp3")
     _download(full_url, full_mp3)
 
+    # The CDN sometimes serves a DIFFERENT master than the one the API's
+    # timings describe (surah 2: API says 8655s/232MB, CDN serves 9685s/137MB —
+    # same recitation, ~3.6s more inter-ayah pause per ayah). Slicing that file
+    # at the API's timestamps grabs audio from progressively wrong positions
+    # (up to ~17 min off by 2:286). Detect it by duration and fall back to
+    # everyayah's per-ayah clips, which are cut from the master the segment
+    # timeline was built for (verified by cross-correlation + qtm span match).
+    api_dur = af.get("duration")   # ms, describes the timeline's master
+    swapped = bool(api_dur) and abs(_duration_ms(full_mp3) - api_dur) > 5000
+    if swapped:
+        print(f"  !! CDN file duration {_duration_ms(full_mp3)}ms != API "
+              f"{api_dur}ms — timeline mismatch; using everyayah per-ayah clips")
+
     vt_by_key = {vt["verse_key"]: vt for vt in af["verse_timings"]}
     # Whole surah: ayah numbers from the API, in order.
     ayah_nums = sorted(int(k.split(":")[1]) for k in vt_by_key)
@@ -83,12 +116,27 @@ def process_surah(surah):
         vt = vt_by_key[f"{surah}:{ayah}"]
         base = vt["timestamp_from"]
         end = vt["timestamp_to"]
-        # Per-ayah audio, sliced from the full surah file.
+        segs = vt.get("segments", [])
+        # The qdc API sometimes returns a bogus timestamp_to (~10s past base) for
+        # long ayat while the word segments still run to the true end — seen on ~41
+        # of Al-Baqarah's ayat (e.g. 2:187 to-from=10.5s but last word ends at
+        # 112.6s). Slicing on timestamp_to truncates the audio to ~10s while the
+        # .qtm (built from the segments below) spans the whole ayah, so the word
+        # highlight desyncs badly. Trust the segments: never cut before the last
+        # word ends.
+        if segs:
+            last_end = max(int(s[-1]) for s in segs if len(s) >= 2)
+            end = max(end, last_end)
+        # Per-ayah audio: sliced from the full surah file, or fetched whole
+        # from everyayah when the CDN's full file doesn't match the timeline.
         out_mp3 = os.path.join(AUDIO_ROOT, str(surah), f"{ayah}.mp3")
         try:
-            _slice(full_mp3, base, end, out_mp3)
-        except subprocess.CalledProcessError as e:
-            print(f"  !! slice failed {surah}:{ayah} — skipping ({e})")
+            if swapped:
+                _download_force(EVERYAYAH.format(s=surah, a=ayah), out_mp3)
+            else:
+                _slice(full_mp3, base, end, out_mp3)
+        except (subprocess.CalledProcessError, urllib.error.URLError) as e:
+            print(f"  !! audio failed {surah}:{ayah} — skipping ({e})")
             continue   # keep the .qtm consistent with the mp3s that exist
         # Word timings, normalized to ayah start. Segments are usually
         # [word_no, start_ms, end_ms] but some come back [start_ms, end_ms] — take
@@ -111,8 +159,12 @@ def process_surah(surah):
 
 
 def main():
+    import sys
+    # Optional surah numbers on the CLI regenerate just those (e.g. re-slice a
+    # single surah after the timestamp_to fix); no args = the whole SAMPLE set.
+    surahs = [int(a) for a in sys.argv[1:]] or SAMPLE
     os.makedirs(CACHE, exist_ok=True)
-    for surah in SAMPLE:
+    for surah in surahs:
         print(f"surah {surah} reciter={RECITER_DIR}")
         try:
             process_surah(surah)
