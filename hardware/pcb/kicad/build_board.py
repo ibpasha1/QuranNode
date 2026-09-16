@@ -72,8 +72,14 @@ for ref,(val,fpid) in comps.items():
     fp_objs[ref] = fp
 
 def half_ext(fp):
-    ps=list(fp.Pads()); xs=[pcbnew.ToMM(p.GetPosition().x) for p in ps]; ys=[pcbnew.ToMM(p.GetPosition().y) for p in ps]
-    return ((max(xs)-min(xs))/2+0.6, (max(ys)-min(ys))/2+0.6)
+    # use pad EDGES (position +/- size/2), not centres, so big-pad parts (inductor)
+    # don't overlap; small margin is then enough -> keeps routing fast.
+    ps=list(fp.Pads())
+    xmin=min(pcbnew.ToMM(p.GetPosition().x)-pcbnew.ToMM(p.GetSize().x)/2 for p in ps)
+    xmax=max(pcbnew.ToMM(p.GetPosition().x)+pcbnew.ToMM(p.GetSize().x)/2 for p in ps)
+    ymin=min(pcbnew.ToMM(p.GetPosition().y)-pcbnew.ToMM(p.GetSize().y)/2 for p in ps)
+    ymax=max(pcbnew.ToMM(p.GetPosition().y)+pcbnew.ToMM(p.GetSize().y)/2 for p in ps)
+    return ((xmax-xmin)/2+0.5, (ymax-ymin)/2+0.5)
 
 GRID, occ = 1.0, set()
 def _cells(cx,cy,hw,hh):
@@ -102,6 +108,18 @@ print(f"placed {len(pos)} parts (size-aware); J3 header rotated horizontal")
 # ---------------------------------------------------------------- build board
 board = pcbnew.NewBoard(OUT)
 board.SetCopperLayerCount(4)
+# JLCPCB-friendly design rules (so autoroute vias/tracks don't flag against defaults)
+try:
+    ds = board.GetDesignSettings()
+    ds.m_ViasMinSize      = pcbnew.FromMM(0.3)
+    ds.m_MinThroughDrill  = pcbnew.FromMM(0.2)
+    ds.m_TrackMinWidth    = pcbnew.FromMM(0.15)
+    ds.m_MinClearance     = pcbnew.FromMM(0.1)
+    for attr,val in (("m_HoleClearance",0.15),("m_HoleToHoleMin",0.15),
+                     ("m_CopperEdgeClearance",0.1),("m_MinThroughDrill",0.15)):
+        if hasattr(ds,attr): setattr(ds,attr,pcbnew.FromMM(val))
+except Exception as e:
+    print("  (design-rule set skipped:", e, ")")
 # outline
 for (x1,y1),(x2,y2) in G.EDGES:
     s = pcbnew.PCB_SHAPE(board); s.SetShape(pcbnew.SHAPE_T_SEGMENT)
@@ -118,6 +136,8 @@ for ref, fp in fp_objs.items():
     c=pcbnew.VECTOR2I((min(xs)+max(xs))//2, (min(ys)+max(ys))//2)
     fp.Move(pcbnew.VECTOR2I(V(*pos[ref]).x - c.x, V(*pos[ref]).y - c.y))
     board.Add(fp)
+    try: fp.Reference().SetLayer(pcbnew.F_Fab)   # refs off silk -> no silk-over-copper
+    except Exception: pass
 # nets
 netmap = {}
 for nm in nets:
