@@ -1,19 +1,33 @@
-# QuranNode mainboard — HANDOFF (finish the PCB)
+# QuranNode mainboard — HANDOFF (routing DONE, board is fab-ready)
 
-You're picking up a **custom KiCad PCB** for the QuranNode, built by a headless
-SKiDL→pcbnew→FreeRouting pipeline. The board is **electrically clean (0 shorts/
-clearance/mask-bridge DRC faults) and ~94% autorouted**. Your job: **finish the last
-~19 traces**, then it's fab-ready. Everything is reproducible from scripts here.
+A **custom KiCad PCB** for the QuranNode, built by a headless
+SKiDL→pcbnew→FreeRouting pipeline. **Routing is COMPLETE: 0 unconnected,
+0 electrical DRC faults.** Gerbers + drill are exported in `fab/`. What's left
+before ordering is the §6 verify checklist (IC pinouts, land patterns, enclosure
+reconciliation). Everything is reproducible from scripts here.
 
 ---
 
-## 0. TL;DR status
+## 0. TL;DR status (2026-09-16)
 - `qurannode.kicad_pcb` — 4-layer, 62.9 × 150 mm, ~88 parts, GND(In1)/3V3(In2) planes
-  + F/B GND pours. **Opens in KiCad. 0 electrical DRC faults. 19 nets unrouted.**
-- Remaining DRC (117 total) is **all non-blocking**: ~25 footprint-inherent (edge
-  connectors, ESP32 thermal-pad drills, USB-C/mic mounting holes — JLCPCB fabs fine)
-  + ~92 cosmetic (silk-over-pad which JLC auto-clips, tight courtyards).
-- **Finish line = route 19 traces** (KiCad interactive router, ~15 min) → DRC clean → fab.
+  + F/B GND pours. **0 unconnected. 0 shorts/clearance/crossing faults.**
+- Remaining DRC (31 total) is **all non-blocking**: 12 drill-out-of-range (WROOM
+  thermal-pad stitching drills, footprint-inherent), 5 hole-clearance (USB-C mounting
+  NPTHs, INMP441 port hole — footprint-inherent), 2 copper-edge (J2 microSD shield
+  pads near the card-slot edge; ≥0.3 mm, within JLC capability), 12 silk (auto-clipped).
+- `fab/qurannode_gerbers.zip` — Gerbers (11 layers) + Excellon drill, kicad-cli export.
+- What changed since the 19-unrouted state (all in scripts, reproducible):
+  1. **J2 microSD + J6 jack were placed with pads OFF the board** and openings facing
+     INTO it (clamp only bounded footprint centres). Both now rotated 180° with an
+     extent-aware clamp → all copper on-board, card/plug openings face the edges.
+  2. **Parts were being placed UNDER the ESP32 module** (occupancy grid used pad
+     extents; the WROOM antenna end is padless). Occupancy is now pads ∪ courtyard
+     → R27 escaped from under U1, all 22 courtyard overlaps gone, and the previously
+     unroutable DISP_BL/BL_G/SD nets routed on the next FR pass.
+  3. **In2 +3V3 plane fill tightened** (clearance 0.2, min width 0.15 — set in
+     build_board) so the plane survives via fences instead of splitting into islands.
+  4. **`heal_plane.py` — new final pipeline step (e2)**: closes the 3 gaps FR can't
+     see (2 plane-island bridges on B.Cu + the INMP441 3V3 pad fanout).
 
 ---
 
@@ -65,8 +79,18 @@ nohup java -jar tools/freerouting-1.9.0.jar -de qurannode.dsn -do qurannode.ses 
 # (e) import routes + GND pours + fill  — KiCad python
 "$KPY" finalize.py           # -> qurannode.kicad_pcb (ROUTED)
 
-# (f) DRC
+# (e2) close the 3 gaps FreeRouting can't see (plane islands + INMP441 fanout)
+"$KPY" heal_plane.py         # coords match the COMMITTED qurannode.ses (now
+                             # force-added to git — FR output can vary across
+                             # versions, so skip (c) and reuse it when possible)
+
+# (f) DRC — expect 0 unconnected, 0 electrical faults, 31 non-blocking
 "$CLI" pcb drc --output drc.json --format json --severity-all qurannode.kicad_pcb
+
+# (g) fab outputs
+mkdir -p fab
+"$CLI" pcb export gerbers --layers F.Cu,In1.Cu,In2.Cu,B.Cu,F.Mask,B.Mask,F.Silkscreen,B.Silkscreen,F.Paste,B.Paste,Edge.Cuts -o fab/ qurannode.kicad_pcb
+"$CLI" pcb export drill --format excellon --excellon-units mm --generate-map --map-format gerberx2 -o fab/ qurannode.kicad_pcb
 ```
 
 ---
@@ -87,15 +111,22 @@ nohup java -jar tools/freerouting-1.9.0.jar -de qurannode.dsn -do qurannode.ses 
 
 ## 4. Remaining work (priority order)
 
-1. **Route the last ~19 traces.** Open `qurannode.kicad_pcb` in KiCad → interactive
-   router. Or try more FreeRouting passes (`-mp 30`) — it plateaus around here headless.
-   The board is dense but has room; the planes handle GND/3V3.
-2. **Confirm DRC has 0 electrical faults** after routing (shorts/clearance/mask-bridge).
-   Ignore/accept the footprint-inherent + cosmetic ones (see §0), or add DRC exclusions.
-3. **Silk cleanup (optional):** refs are on F.Fab (no silk). If you want silk refs,
+1. ~~Route the last traces~~ **DONE — 0 unconnected, 0 electrical DRC faults.**
+2. **Work §6 verify checklist** (IC pinouts, land patterns, enclosure) — the only
+   gate left before ordering.
+3. **BOM + CPL for JLC SMT** (gerbers already in `fab/`): needs LCSC part numbers;
+   use the JLCPCB fab plugin in the GUI, or hand-write CPL from `placement.md`.
+   Mark hand-soldered parts (USB-C J1, microSD J2, JSTs J4/J5, jack J6, ESP32
+   module U1) as DNP-for-SMT.
+4. **Silk cleanup (optional):** refs are on F.Fab (no silk). If you want silk refs,
    re-place them off copper in the GUI.
-4. **Export for fab:** JLCPCB fab plugin → Gerbers + BOM + CPL. Mark hand-soldered parts
-   (USB-C J1, microSD J2, JSTs J4/J5, jack J6, ESP32 module U1) as DNP-for-SMT.
+
+If a re-route ever leaves new unconnected items, the debugging recipe that worked:
+DRC json → for each pair, dump copper/holes within ~3 mm of both endpoints (all
+layers — FR routes signals on In1/In2 too!) → bridge plane islands via same-net
+vias on B.Cu/In2, fan out stranded pads with a stub+via NEXT to the pad (never
+in-pad), keep 0.15 copper / 0.25 hole-to-copper (+margin), re-DRC. Update the
+coordinates in `heal_plane.py`.
 
 ## 5. Firmware TODO (in `firmware/components/qn/drivers/pin_config.h`)
 - `PIN_PWR_HOLD` (GPIO48): **drive HIGH at the very top of `app_main`** or the soft-latch
@@ -111,6 +142,10 @@ nohup java -jar tools/freerouting-1.9.0.jar -de qurannode.dsn -do qurannode.ses 
   estimated; measure your module's pin-1-to-glass to align the screen to the lid window.
 - **Enclosure not reconciled:** the LCD is now **board-mounted** (was lid-mounted in
   `hardware/enclosure`). Screen rabbet + port edges + removed power switch need rework.
+  Also new since the J2/J6 placement fix: the microSD opening sits at the board top
+  edge (card travels over the top strip; slot in the case wall must line up), and the
+  jack J6 moved up to y≈144.4 with its barrel overhanging the bottom edge by ~4 mm —
+  check barrel length vs wall thickness so the plug seats.
 
 ## 7. Gotchas / pitfalls (these bit us)
 1. **RACE: never run `finalize.py` while FreeRouting is still running** or before
