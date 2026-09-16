@@ -1,0 +1,24 @@
+(kicad_sch
+	(version 20231120)
+	(generator "eeschema")
+	(generator_version "8.0")
+	(uuid "b1d2c3a4-0001-4000-8000-000000000001")
+	(paper "A3")
+	(title_block
+		(title "QuranNode mainboard")
+		(rev "A")
+		(company "QuranNode")
+		(comment 1 "Capture this schematic from ../netlist.md")
+		(comment 2 "Assign LCSC part numbers from ../BOM.csv as you go")
+	)
+	(lib_symbols)
+	(text "QuranNode mainboard - schematic capture starts here.\n\nBuild the sheets in this order (see ../netlist.md for every pin/net):\n  1. Power   : USB-C -> TP4056 -> [cell protect] -> TPS63020 -> +3V3 / VSYS\n  2. MCU     : ESP32-S3-WROOM-1 (EN/IO0, USB via USBLC6, all GPIO nets)\n  3. Audio   : PCM5102A DAC -> 3.5mm jack + PAM8302A amp -> speaker\n  4. Display : ST7796S SPI + I2C touch + backlight FET\n  5. SD      : microSD (SPI)\n  6. Nav     : 5-way switch\n\nParts + JLCPCB-SMT/hand split + LCSC #s: ../BOM.csv\nWorkflow / footprints / stackup / layout: ../DESIGN.md\nPull IC symbols from a verified library (SnapEDA / JLCPCB), not by hand."
+		(exclude_from_sim no)
+		(at 30 30 0)
+		(effects (font (size 2.0 2.0)) (justify left top))
+		(uuid "b1d2c3a4-0002-4000-8000-000000000002")
+	)
+	(sheet_instances
+		(path "/" (page "1"))
+	)
+)

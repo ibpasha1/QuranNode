@@ -1,0 +1,27 @@
+# python / SKiDL
+.venv/
+__pycache__/
+*.pyc
+*_sklib.py
+*.erc
+*.log
+skidl_REPL*
+
+# large tooling (downloadable) — FreeRouting jars
+tools/
+
+# regenerable build artifacts
+*.dsn
+*.ses
+*.svg
+qurannode.svg.png
+drc.json
+fr.log
+
+# KiCad local user settings
+*.kicad_prl
+*-backups/
+fp-info-cache
+
+# editor local-history
+.history/

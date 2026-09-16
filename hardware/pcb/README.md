@@ -1,9 +1,18 @@
-# QuranNode — mainboard BOM (for costing / quoting)
+# QuranNode — mainboard (design + BOM)
 
-A first-pass **bill of materials for a single integrated PCB** that replaces the
-current breakout-board prototype (ESP32-S3 module + PCM5102 board + TP4056 board +
-INMP441 board + nav breakout) with one board. Intended to drop into a quoting tool
-(JLCPCB/PCBWay assembly, Digi-Key/Mouser, etc.) for a real per-unit number.
+A single integrated PCB replacing the breakout-board prototype (ESP32-S3 module +
+PCM5102 board + TP4056 board + INMP441 board + nav breakout).
+
+**Design files (start here):**
+| File | What |
+|------|------|
+| `netlist.md` | **Schematic** — every block, pin, net, and reference-design passive |
+| `BOM.csv` | Parts list with LCSC #s, JLCPCB-SMT-vs-hand split, Basic/Extended flags |
+| `DESIGN.md` | **KiCad + JLCPCB workflow** — symbols/footprints, stackup, fab, layout |
+| `README.md` | This file — architecture, pin map, costing |
+
+**Workflow:** KiCad schematic/layout → JLCPCB fab + SMT of the fine-pitch ICs,
+passives, and mic → hand-solder the module, connectors, switches, jack.
 
 > **Nothing here is verified against a schematic yet** — it's derived from the
 > firmware pin map (`pin_config.h`) and the reference designs of each IC. Treat
