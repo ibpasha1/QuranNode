@@ -59,14 +59,21 @@ MAP = {
     ('FS8205A',None):('C908265','SOT-23-6',''),    # was C32254 (0 stock) -> C908265 in stock
     ('RST',None):      ('C318884','SW_TL3342','V'), # TS-1187A 5.1x5.1; verify vs TL3342 land
     ('BOOT',None):     ('C318884','SW_TL3342','V'),
+    # SMD connectors -- machine-placed; codes are exact footprint matches (verified 2026-09-24)
+    ('USB-C-16P',None):('C319148','USB-C-16P',''),      # XKB U262-161N-4BVC11, JLC Basic ~38k
+    ('microSD',None):  ('C114218','microSD-DM3AT','V'), # Hirose DM3AT (confirm JLC-assembly SKU)
+    ('TRS_3.5',None):  ('C2939583','PJ-31060',''),      # HOOYA PJ-31060, Standard-only
     # --- hand-soldered parts below are EXCLUDED from the JLC BOM/CPL (see EXCLUDE) ---
 }
 
 # Hand-populated, EXCLUDED from the JLC assembly BOM/CPL:
-#  - module, all connectors, nav switch (Place=Hand)
+#  - J3 LCD header, J4/J5 JST: THROUGH-HOLE, cannot be reflowed.
+#  - SW1 nav: custom land, no in-stock SMT part.
 #  - SW2/SW3 RST/BOOT: lid-covered recovery buttons on an E-Switch TL3342 6mm land
 #    (the in-stock TS-1187A is 5.1mm and does not fit); hand-populate a TL3342-compatible.
-EXCLUDE = {'U1','J1','J2','J3','J4','J5','J6','SW1','SW2','SW3'}
+# The SMD connectors (J1 USB-C, J2 uSD, J6 jack) + the module (U1) ARE machine-placed
+# with exact-footprint-match in-stock parts (verified 2026-09-24) -- see MAP.
+EXCLUDE = {'J3','J4','J5','SW1','SW2','SW3'}
 THT  = set()  # filled from parse (attr through_hole)
 
 def blocks(s, tag):

@@ -7,8 +7,8 @@ scripts in `../` (see `../HANDOFF.md` §2 for the pipeline).
 | File | Upload to JLCPCB as |
 |------|---------------------|
 | `qurannode_gerbers.zip` | Gerber (4-layer, 1.6 mm, **ENIG**) — bare-board fab |
-| `qurannode-cpl.csv` | CPL / pick-and-place — **73 SMT parts, all Top** |
-| `qurannode-bom-jlc.csv` | BOM — **29 lines, every part a verified in-stock LCSC #** |
+| `qurannode-cpl.csv` | CPL / pick-and-place — **77 SMT parts, all Top** |
+| `qurannode-bom-jlc.csv` | BOM — **32 lines, every part a verified in-stock LCSC #** |
 
 CPL frame matches the gerbers (X = board X, Y = −board Y). Still eyeball pin-1 on
 polarised parts in JLCPCB's preview before confirming.
@@ -25,10 +25,17 @@ polarised parts in JLCPCB's preview before confirming.
 | U7/U8 protect | DW01A+FS8205 mis-wired + redundant | **removed** (LP603449 has its own PCM); cell− → GND |
 | SD_MISO pull-up | placed at power centroid, net unroutable | pinned near J2 in `build_board.py` |
 
+## Machine-placed SMD connectors + module (in the CPL/BOM, exact footprint match)
+`U1` ESP32 (C2913202) · `J1` USB-C (**C319148** XKB U262-161N, JLC Basic) ·
+`J2` µSD (**C114218** Hirose DM3AT) · `J6` 3.5 mm jack (**C2939583** HOOYA PJ-31060).
+Caveats at order time: USB-C is "High" difficulty + a support fixture (~$0.03/part);
+the jack is "Standard-only"; **confirm J2 (C114218) is in JLC's *assembly* library** —
+if it's LCSC-stock-only, toggle J2 back to hand-solder.
+
 ## Hand-populate (excluded from the SMT CPL/BOM — buy + solder separately)
-`U1` ESP32 · `J1` USB-C · `J2` µSD · `J3` LCD header · `J4/J5` JST-PH · `J6` 3.5 mm jack ·
-`SW1` 5-way nav · `SW2/SW3` RST/BOOT (E-Switch **TL3342** 6 mm land — hand-fit a
-TL3342-compatible; the in-stock TS-1187A is 5.1 mm and does not fit).
+`J3` LCD header · `J4/J5` JST-PH — **through-hole, cannot be reflowed**.
+`SW1` 5-way nav (custom land) · `SW2/SW3` RST/BOOT (E-Switch **TL3342** 6 mm land —
+hand-fit a TL3342-compatible; the in-stock TS-1187A is 5.1 mm and does not fit).
 
 ## Off-board (device cost, not the PCBA quote)
 3.5" ST7796S cap-touch module · 28 mm speaker · EEMB LP603449 cell (must ship with its
