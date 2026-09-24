@@ -137,21 +137,27 @@ with open('fab/qurannode-cpl.csv','w',newline='') as f:
         w.writerow([ref, f'{at[0]:.4f}', f'{-at[1]:.4f}', 'Top', f'{at[2]:.0f}'])
 print(f'CPL : fab/qurannode-cpl.csv  ({len(parts)} SMT placements, all Top; {len(excluded)} hand parts excluded)')
 
-# ---- BOM (grouped by LCSC part; JLCPCB import format) ------------------------
-groups={}
+# ---- BOM (one line per LCSC part; JLCPCB import format) ----------------------
+# Group by LCSC # so parts with the same C# but different value strings (e.g. the
+# 2N7002 tagged "2N7002" vs "2N7002_NFET") become ONE line -- JLCPCB rejects two BOM
+# lines matched to the same part. Blank-LCSC lines fall back to (value,footprint).
+def clean(val):  # tidy the display comment: drop _NFET/_PFET-style tags
+    return re.sub(r'_(N|P)FET$','',val)
+groups={}   # key -> {'refs':[], 'comment':str, 'fp':str, 'lcsc':str}
 issues=[]
 for ref,val,lib,at in parts:
     lcsc,fp,verify=lookup(val,lib)
-    key=(lcsc,val,fp)
-    groups.setdefault(key,[]).append(ref)
+    key=lcsc if lcsc else ('',clean(val),fp)
+    g=groups.setdefault(key,{'refs':[],'comment':clean(val),'fp':fp,'lcsc':lcsc})
+    g['refs'].append(ref)
     if verify or not lcsc:
         issues.append((ref,val,lib,lcsc,verify))
 
 with open('fab/qurannode-bom-jlc.csv','w',newline='') as f:
     w=csv.writer(f); w.writerow(['Comment','Designator','Footprint','LCSC Part #'])
-    for (lcsc,val,fp),refs in sorted(groups.items(), key=lambda kv: refnum(kv[1][0])):
-        refs_sorted=sorted(refs,key=refnum)
-        w.writerow([val, ','.join(refs_sorted), fp, lcsc])
+    for g in sorted(groups.values(), key=lambda g: refnum(sorted(g['refs'],key=refnum)[0])):
+        refs_sorted=sorted(g['refs'],key=refnum)
+        w.writerow([g['comment'], ','.join(refs_sorted), g['fp'], g['lcsc']])
 print(f'BOM : fab/qurannode-bom-jlc.csv  ({len(groups)} lines)')
 
 # ---- report ------------------------------------------------------------------
