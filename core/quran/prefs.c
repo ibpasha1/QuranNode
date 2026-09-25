@@ -4,6 +4,7 @@
 #include "plat.h"
 #include <string.h>
 #include <stdio.h>
+#include <stddef.h>
 
 static const char *TAG = "PREFS";
 #define PREFS_MAGIC 0x51505232u   // "QPR2" (v2 added lat/lng)
@@ -19,20 +20,30 @@ static void set_defaults(void)
     g_prefs.brightness = 55;   // legible but easy on the battery (backlight is the top draw)
     g_prefs.tajweed = 0;
     g_prefs.volume = 90;     // -> ~1.8x gain (line-out is quiet)
-    g_prefs.output = 0;      // headphone
-    // Prayer-time location. New York until a Settings editor / GPS exists —
-    // edit here (or the persisted blob) for your city.
+    g_prefs.output = 2;      // 0 headphone, 1 speaker, 2 auto (follow jack-detect) — default
+    // Prayer-time location, defaulting to New York; edit in Settings > Location.
     g_prefs.lat = 40.71f;
     g_prefs.lng = -74.01f;
+    // Time zone: derive from the platform until the user picks a city/offset.
+    g_prefs.tz_std_min = TZ_AUTO;
+    g_prefs.dst = 0;
 }
 
 void prefs_init(void)
 {
     PrefsBlob b;
+    memset(&b, 0, sizeof b);
     size_t got = 0;
-    if (hal_state_load("prefs", &b, sizeof(b), &got) &&
-        got == sizeof(b) && b.magic == PREFS_MAGIC) {
+    // Accept any blob that carries at least the pre-v3 prefix (through lng); the
+    // appended tz fields default to "auto" when a shorter v2 blob is loaded.
+    size_t need = offsetof(PrefsBlob, p) + offsetof(Prefs, tz_std_min);
+    bool loaded = hal_state_load("prefs", &b, sizeof(b), &got) &&
+                  b.magic == PREFS_MAGIC && got >= need;
+    if (loaded) {
         g_prefs = b.p;
+        // Append-only migration: a v2 blob (before tz_std_min/dst) is shorter,
+        // so those trailing fields read back as zero — treat that as "auto".
+        if (got < sizeof(b)) { g_prefs.tz_std_min = TZ_AUTO; g_prefs.dst = 0; }
         QN_LOGI(TAG, "loaded: rate=%.2f font=%d bright=%d tajweed=%d",
                 g_prefs.rate, g_prefs.font_size, g_prefs.brightness, g_prefs.tajweed);
     } else {
@@ -44,11 +55,15 @@ void prefs_init(void)
     if (g_prefs.brightness < 10) g_prefs.brightness = 10;
     if (g_prefs.brightness > 100) g_prefs.brightness = 100;
     if (g_prefs.volume > 100) g_prefs.volume = 100;
-    if (g_prefs.output > 1) g_prefs.output = 0;
+    if (g_prefs.output > 2) g_prefs.output = 2;   // 0 headphone, 1 speaker, 2 auto
     if (g_prefs.lat < -90.f || g_prefs.lat > 90.f ||
         g_prefs.lng < -180.f || g_prefs.lng > 180.f) {
         g_prefs.lat = 40.71f; g_prefs.lng = -74.01f;
     }
+    if (g_prefs.tz_std_min != TZ_AUTO &&
+        (g_prefs.tz_std_min < -720 || g_prefs.tz_std_min > 840))
+        g_prefs.tz_std_min = TZ_AUTO;
+    if (g_prefs.dst > 1) g_prefs.dst = 0;
     prefs_apply();
 }
 
@@ -56,6 +71,12 @@ void prefs_save(void)
 {
     PrefsBlob b = { .magic = PREFS_MAGIC, .p = g_prefs };
     hal_state_save("prefs", &b, sizeof(b));
+}
+
+int prefs_tz_offset_min(void)
+{
+    if (g_prefs.tz_std_min == TZ_AUTO) return hal_tz_offset_min();
+    return g_prefs.tz_std_min + (g_prefs.dst ? 60 : 0);
 }
 
 float prefs_volume_gain(void)

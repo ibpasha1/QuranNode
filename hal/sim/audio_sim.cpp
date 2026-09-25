@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
 
 #define DR_MP3_IMPLEMENTATION
 #include "vendor/dr_mp3.h"
@@ -119,7 +120,7 @@ static void make_current(HalAudioClip *c)
 }
 
 // --- HAL audio API -----------------------------------------------------------
-extern "C" HalAudioClip *hal_audio_open(const char *rel)
+static HalAudioClip *decode_clip(const char *rel)
 {
     uint8_t *data; size_t len;
     if (!hal_fs_slurp(rel, &data, &len)) return nullptr;
@@ -136,6 +137,35 @@ extern "C" HalAudioClip *hal_audio_open(const char *rel)
     c->rate = cfg.sampleRate;
     c->channels = cfg.channels;
     return c;
+}
+
+// One-slot prefetch cache mirroring the device HAL. The desktop has no audible
+// transition gap (decode is instant off an SSD), but honouring the same contract
+// keeps the player's prefetch path exercised under `make run`. Main-thread only.
+static HalAudioClip *g_pf_clip = nullptr;
+static std::string   g_pf_path;
+
+extern "C" HalAudioClip *hal_audio_open(const char *rel)
+{
+    if (g_pf_clip && rel && g_pf_path == rel) {   // prefetched hit: hand it over
+        HalAudioClip *c = g_pf_clip;
+        g_pf_clip = nullptr; g_pf_path.clear();
+        return c;
+    }
+    if (g_pf_clip) {   // staged something we then navigated away from — drop it
+        hal_audio_close(g_pf_clip);
+        g_pf_clip = nullptr; g_pf_path.clear();
+    }
+    return decode_clip(rel);
+}
+
+extern "C" void hal_audio_prefetch(const char *rel)
+{
+    if (!rel) return;
+    if (g_pf_clip && g_pf_path == rel) return;   // already staged
+    if (g_pf_clip) { hal_audio_close(g_pf_clip); g_pf_clip = nullptr; g_pf_path.clear(); }
+    g_pf_clip = decode_clip(rel);
+    if (g_pf_clip) g_pf_path = rel;
 }
 
 extern "C" void hal_audio_close(HalAudioClip *c)
@@ -217,7 +247,8 @@ extern "C" void hal_audio_set_rate(HalAudioClip *c, float rate)
 }
 
 extern "C" void hal_audio_set_volume(float v) { g_volume = v; }
-extern "C" void hal_audio_set_output(int speaker) { (void)speaker; }   // no amp in sim
+extern "C" void hal_audio_set_output(int mode) { (void)mode; }         // no amp in sim
+extern "C" int  hal_audio_headphone_present(void) { return 0; }        // no jack-detect in sim
 
 // --- Raw PCM access ----------------------------------------------------------
 extern "C" uint32_t hal_audio_read_pcm16(HalAudioClip *c, uint32_t start_ms,
@@ -403,9 +434,12 @@ extern "C" void hal_audio_click(bool accent)
     const int N = 22050 * 12 / 1000;
     float buf[N];
     const float freq = accent ? 1760.0f : 1175.0f;
+    // Track the master volume (like the device does); cap at 1.0 so the tick
+    // only ever scales DOWN from its tuned 0.16 baseline, and 0 mutes it.
+    float g = g_volume > 1.0f ? 1.0f : g_volume;
     for (int i = 0; i < N; i++) {
         float t = (float)i / 22050.0f;
-        buf[i] = 0.16f * expf(-t * 420.0f) * sinf(6.2831853f * freq * t);
+        buf[i] = 0.16f * g * expf(-t * 420.0f) * sinf(6.2831853f * freq * t);
     }
     // Don't let rapid scrolling pile up latency: skip if a few are queued.
     if (SDL_GetQueuedAudioSize(g_click_dev) < 3 * sizeof(buf))

@@ -69,6 +69,12 @@ bool hal_state_load(const char *name, void *buf, size_t cap, size_t *out_len);
 typedef struct HalAudioClip HalAudioClip;
 
 HalAudioClip *hal_audio_open(const char *rel_path);   // NULL on failure
+// Best-effort async preload: pull this clip's bytes off the SD card on a
+// background worker so a later hal_audio_open(rel_path) for the SAME path
+// returns instantly instead of stalling on a multi-MB read — which is what
+// gaps the audio (and starves neighbouring reads) at an ayah transition. Only
+// the most recent request is kept; a miss just falls back to a synchronous open.
+void   hal_audio_prefetch(const char *rel_path);
 void   hal_audio_close(HalAudioClip *clip);
 void   hal_audio_play(HalAudioClip *clip);            // (re)start playback
 void   hal_audio_pause(HalAudioClip *clip);
@@ -89,7 +95,8 @@ uint32_t hal_audio_latency_ms(HalAudioClip *clip);
 void   hal_audio_seek_ms(HalAudioClip *clip, uint32_t ms);
 void   hal_audio_set_rate(HalAudioClip *clip, float rate);  // 1.0 = normal, 0.85 = slower
 void   hal_audio_set_volume(float vol);               // gain multiplier (1.0 = unity)
-void   hal_audio_set_output(int speaker);             // 1 = speaker (amp on when playing), 0 = headphone
+void   hal_audio_set_output(int mode);                // 0 = headphone, 1 = speaker, 2 = auto (follow jack)
+int    hal_audio_headphone_present(void);             // 1 = a plug is inserted (jack-detect), 0 = not / no detect
 
 // --- Wall clock ----------------------------------------------------------
 // Real-world time for the home clock + prayer times: seconds since the Unix
@@ -110,6 +117,12 @@ typedef enum {
 
 QnClockSource hal_clock_source(void);
 void          hal_clock_persist(void);   // save the current epoch (no-op in sim)
+
+// Manually set the wall clock to `epoch` (seconds since the Unix epoch, UTC).
+// For the offline "set the time by hand" path when there's no NTP. Marks the
+// clock authoritative (SYNCED) and persists it. In the sim it shifts the
+// reported time by a stored delta (the host clock isn't touched).
+void          hal_clock_set(int64_t epoch);
 
 // --- UI sounds -----------------------------------------------------------
 // Short UI tick for menu scrolling / selection. Cheap and rate-safe; `accent`
@@ -179,6 +192,68 @@ const char *hal_ota_status(void);
 bool        hal_ota_boot_check(void);
 void        hal_ota_apply(void);
 
+// Background boot check (used by the splash instead of a blocking boot_check):
+// hal_ota_check_start() spawns a one-shot Wi-Fi probe that compares the latest
+// release to this build and grabs NTP time, then drops Wi-Fi. Non-blocking and
+// idempotent; an instant no-op offline. hal_ota_update_available() reports true
+// once a newer release was seen, so Home can badge it and the user can pull it
+// from Settings > Update firmware (hal_ota_pull).
+void        hal_ota_check_start(void);
+bool        hal_ota_update_available(void);
+
 // True if the user is holding the recovery combo at boot (5-way center). Lets a
 // sealed unit force Wi-Fi update mode even if the normal UI is broken.
 bool        hal_recovery_requested(void);
+
+// --- Wi-Fi provisioning (SoftAP + captive-portal onboarding) --------------
+// First-run flow: the device raises its own open access point and a captive
+// portal; the user scans the on-screen QR to join it, picks their home network
+// and types the password. Creds are saved to NVS and used on every boot after
+// (hal_wifi_have_creds); the build-flag secrets.ini stays a dev fallback. All
+// no-ops in the sim.
+typedef enum {
+    QN_PROV_IDLE = 0,     // not provisioning
+    QN_PROV_AP,           // setup AP up, waiting for the user's credentials
+    QN_PROV_CONNECTING,   // got credentials, joining the home network
+    QN_PROV_CONNECTED,    // joined; creds saved
+    QN_PROV_FAILED,       // last join attempt failed (bad password / not found)
+} QnProvState;
+
+bool         hal_wifi_have_creds(void);       // are Wi-Fi credentials stored?
+void         hal_wifi_provision_start(void);  // raise the setup AP + portal
+void         hal_wifi_provision_stop(void);   // tear it down
+const char  *hal_wifi_ap_ssid(void);          // setup AP SSID, for the QR (NULL if down)
+const char  *hal_wifi_ap_pass(void);          // setup AP password, for the QR (NULL/"" = open)
+const char  *hal_wifi_sta_ssid(void);         // the network being joined (NULL if none)
+QnProvState  hal_wifi_prov_state(void);        // poll for the setup scene
+
+// --- Classroom sync (ESP-NOW peer broadcast) ------------------------------
+// "Follow the Sheikh": a leader device broadcasts its reading position and every
+// follower in radio range converges on it — pages turn together, the same word
+// highlights. Connectionless (ESP-NOW: no router, no pairing). The leader keeps
+// ASSERTING an idempotent position (on change + a heartbeat), so a follower that
+// just joined or dropped a packet resyncs on the next beacon. Followers keep the
+// highest seq and ignore stale / duplicate / out-of-order packets.
+//
+// In the sim there's no radio: hal_mesh_* is backed by a shared file under the SD
+// root's state/, so two simulator instances on one machine genuinely follow each
+// other. All calls are cheap no-ops until hal_mesh_start().
+enum { QN_SYNC_MAGIC = 0x51, QN_SYNC_VERSION = 1 };   // 'Q'
+enum { QN_SYNC_PLAYING = 1u << 0 };                   // flags: leader is playing
+
+typedef struct {
+    uint8_t  magic;      // QN_SYNC_MAGIC — stray/foreign packets are dropped
+    uint8_t  version;    // QN_SYNC_VERSION
+    uint8_t  surah;      // 1..114
+    uint8_t  word;       // highlighted glyph-word index, 0xFF = none
+    uint16_t ayah;       // 1..
+    uint16_t pin;        // circle PIN so followers can tell two circles apart
+    uint8_t  flags;      // QN_SYNC_PLAYING
+    uint8_t  _pad;
+    uint32_t seq;        // monotonic per leader; followers keep the highest
+} QnSyncMsg;
+
+void hal_mesh_start(void);                    // bring ESP-NOW up (idempotent)
+void hal_mesh_stop(void);                     // tear it down
+void hal_mesh_broadcast(const QnSyncMsg *m);  // leader: assert current position
+bool hal_mesh_poll(QnSyncMsg *out);           // follower: newest msg since last poll

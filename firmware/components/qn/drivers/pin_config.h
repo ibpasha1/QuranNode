@@ -39,6 +39,11 @@
 //     still play off the DAC's line-out jack). Replaces the MAX98357 SD pin. ---
 #define PIN_AMP_EN          18
 
+// --- Headphone-insert detect: jack tip-switch -> GPIO46 (100k pull-up; 20k tip
+//     pull-down). Plug inserted -> switch opens -> HIGH; no plug -> LOW. GPIO46 is a
+//     strapping pin but ignored in normal boot (GPIO0 high) and only resistor-pulled. ---
+#define PIN_HP_DETECT       46
+
 // --- I2S IN: INMP441 MEMS mic (I2S_NUM_1). L/R->GND ---
 #define PIN_MIC_SCK         7
 #define PIN_MIC_WS          8

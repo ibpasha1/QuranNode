@@ -24,7 +24,7 @@ n = {name: Net(name) for name in [
     "DISP_CS","DISP_MOSI","DISP_CLK","DISP_DC","DISP_RST","DISP_BL","BL_G",
     "TOUCH_SDA","TOUCH_SCL","SD_CS","SD_MOSI","SD_CLK","SD_MISO",
     "NAV_UP","NAV_DN","NAV_L","NAV_R","NAV_MID","AMP_EN",
-    "OUTL","OUTR","AIN","SPK_P","SPK_N","HP_L","HP_R",
+    "OUTL","OUTR","AIN","SPK_P","SPK_N","HP_L","HP_R","HP_DET",
     "EN","IO0","CHG_CHRG","CHG_STBY","PG","VBAT_SENSE",
     "PWR_G","PWR_HOLD","HOLD_G",
 ]}
@@ -39,7 +39,7 @@ R  = tmpl("R","R","Resistor_SMD:R_0402_1005Metric",[("1","1",PAS),("2","2",PAS)]
 C4 = tmpl("C","C","Capacitor_SMD:C_0402_1005Metric",[("1","1",PAS),("2","2",PAS)])
 C6 = tmpl("C","C","Capacitor_SMD:C_0603_1608Metric",[("1","1",PAS),("2","2",PAS)])
 C8 = tmpl("C","C","Capacitor_SMD:C_0805_2012Metric",[("1","1",PAS),("2","2",PAS)])
-Lp = tmpl("L","L","Inductor_SMD:L_Abracon_ASPIAIG-F4020",[("1","1",PAS),("2","2",PAS)])
+Lp = tmpl("L","L","qurannode:MWSA0402S",[("1","1",PAS),("2","2",PAS)])  # matches C408334 land
 FB = tmpl("FB","FB","Inductor_SMD:L_0603_1608Metric",[("1","1",PAS),("2","2",PAS)])
 LED= tmpl("LED","D","LED_SMD:LED_0603_1608Metric",[("1","K",PAS),("2","A",PAS)])
 
@@ -65,47 +65,50 @@ esp = ic("ESP32-S3-WROOM-1","U","RF_Module:ESP32-S3-WROOM-1",[
     ("36","IO42",BI),("37","RXD0",BI),("38","TXD0",BI),("39","IO2",BI),("40","IO1",BI),
     ("41","GND",PWR)], "ESP32")
 
-# PCM5102A TSSOP-20  [VERIFY all pin numbers vs datasheet]
+# PCM5102A TSSOP-20 (PW) -- datasheet SLAS859C p5 VERIFIED (was reversed: 19/20 pins wrong).
+# pins 1-10 down the left, 11-20 up the right. pin3 CPGND named "GND" (ties to GND plane).
 dac = ic("PCM5102A","U","Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm",[
-    ("1","FLT",INP),("2","DEMP",INP),("3","XSMT",INP),("4","FMT",INP),("5","DGND",PWR),
-    ("6","DVDD",PWR),("7","CPVDD",PWR),("8","CAPP",PAS),("9","CAPM",PAS),("10","VNEG",PAS),
-    ("11","AGND",PWR),("12","OUTL",OUT),("13","AVDD",PWR),("14","OUTR",OUT),("15","LRCK",INP),
-    ("16","BCK",INP),("17","DIN",INP),("18","SCK",INP),("19","GND",PWR),("20","LDOO",PAS)],
+    ("1","CPVDD",PWR),("2","CAPP",PAS),("3","GND",PWR),("4","CAPM",PAS),("5","VNEG",PAS),
+    ("6","OUTL",OUT),("7","OUTR",OUT),("8","AVDD",PWR),("9","AGND",PWR),("10","DEMP",INP),
+    ("11","FLT",INP),("12","SCK",INP),("13","BCK",INP),("14","DIN",INP),("15","LRCK",INP),
+    ("16","FMT",INP),("17","XSMT",INP),("18","LDOO",PAS),("19","DGND",PWR),("20","DVDD",PWR)],
     "DAC")
 
-# PAM8302A SOIC-8  [VERIFY]
-amp = ic("PAM8302A","U","Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",[
-    ("1","SD",INP),("2","GND",PWR),("3","IN+",INP),("4","IN-",INP),
-    ("5","VO-",OUT),("6","PGND",PWR),("7","VDD",PWR),("8","VO+",OUT)], "AMP")
+# PAM8302A MSOP-8 (PAM8302AASCR, no thermal pad) -- datasheet DS41333 p9 VERIFIED
+# (was: VDD/GND swapped, VO+/VO- swapped, pin2 tied to GND but it is NC).
+amp = ic("PAM8302A","U","Package_SO:MSOP-8_3x3mm_P0.65mm",[
+    ("1","SD",INP),("2","NC",PAS),("3","IN+",INP),("4","IN-",INP),
+    ("5","VO+",OUT),("6","VDD",PWR),("7","GND",PWR),("8","VO-",OUT)], "AMP")
 
 # TP4056 ESOP-8  [VERIFY -- common: 1 TEMP,2 PROG,3 GND,4 VCC,5 BAT,6 STDBY,7 CHRG,8 CE,9 EP]
 chg = ic("TP4056","U","Package_SO:SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.41x3.3mm",[
     ("1","TEMP",INP),("2","PROG",PAS),("3","GND",PWR),("4","VCC",PWR),("5","BAT",PWR),
     ("6","STDBY",OUT),("7","CHRG",OUT),("8","CE",INP),("9","EP",PWR)], "CHG")
 
-# TPS63020 SON-12 (VSON/QFN)  [VERIFY]
-reg = ic("TPS63020","U","Package_DFN_QFN:DFN-12-1EP_3x4mm_P0.5mm_EP1.7x3.3mm",[
-    ("1","VINA",PWR),("2","EN",INP),("3","PS/SYNC",INP),("4","GND",PWR),("5","FB",INP),
-    ("6","PG",OUT),("7","VOUT",PWR),("8","VOUT",PWR),("9","L2",PAS),("10","L1",PAS),
-    ("11","VIN",PWR),("12","VIN",PWR),("13","GND",PWR)], "REG")
+# TPS63020 DSJ (VSON-14, 0.5mm pitch) -- datasheet SLVS916 VERIFIED. Custom footprint:
+# KiCad's generic VSON-14 is 0.65mm pitch (wrong). EP(15)=PGND, joined to GND on the plane.
+reg = ic("TPS63020","U","qurannode:TPS63020_DSJ_VSON14",[
+    ("1","VINA",PWR),("2","GND",PWR),("3","FB",INP),("4","VOUT",PWR),("5","VOUT",PWR),
+    ("6","L2",PAS),("7","L2",PAS),("8","L1",PAS),("9","L1",PAS),("10","VIN",PWR),
+    ("11","VIN",PWR),("12","EN",INP),("13","PS/SYNC",INP),("14","PG",OUT),("15","GND",PWR)], "REG")
 
-# USBLC6-2SC6 SOT-23-6  [VERIFY -- 1 I/O1,2 GND,3 I/O2,4 I/O3,5 VBUS,6 I/O4]
+# USBLC6-2SC6 SOT-23-6 -- ST DocID11265 VERIFIED. pins 1&6 = one data line (I/O1),
+# pins 3&4 = the other (I/O2). (Was cross-wired: D+/D- split across both lines.)
 esd = ic("USBLC6-2SC6","U","Package_TO_SOT_SMD:SOT-23-6",[
-    ("1","IO1",BI),("2","GND",PWR),("3","IO2",BI),("4","IO3",BI),("5","VBUS",PWR),("6","IO4",BI)],
+    ("1","IO1",BI),("2","GND",PWR),("3","IO2",BI),("4","IO2",BI),("5","VBUS",PWR),("6","IO1",BI)],
     "ESD")
 
-# INMP441 LGA  [VERIFY]
-mic = ic("INMP441","MK","Sensor_Audio:Knowles_LGA-6_4.72x3.76mm",[
-    ("1","SCK",INP),("2","SD",OUT),("3","VDD",PWR),("4","GND",PWR),("5","L/R",INP),("6","WS",INP)],
+# ICS-43434 (TDK) I2S MEMS mic -- INMP441 is out-of-stock; ICS-43434 (C5656610) is the
+# pin-compatible successor. KiCad Sensor_Audio symbol pinout below. Footprint ships with
+# the acoustic port hole (unlike the INMP441 land).
+mic = ic("ICS-43434","MK","Sensor_Audio:InvenSense_ICS-43434-6_3.5x2.65mm",[
+    ("1","WS",INP),("2","L/R",INP),("3","GND",PWR),("4","SCK",INP),("5","VDD",PWR),("6","SD",OUT)],
     "MIC")
 
-# DW01A SOT-23-6 + FS8205A (cell protection, OPTIONAL)  [VERIFY]
-dw = ic("DW01A","U","Package_TO_SOT_SMD:SOT-23-6",[
-    ("1","OD",OUT),("2","CS",INP),("3","OC",OUT),("4","TD",PAS),("5","VCC",PWR),("6","GND",PWR)],
-    "DW01")
-fs = ic("FS8205A","U","Package_TO_SOT_SMD:SOT-23-6",[
-    ("1","S1",PAS),("2","S1b",PAS),("3","G1",INP),("4","S2",PAS),("5","S2b",PAS),("6","G2",INP)],
-    "FS8205")
+# Cell protection (DW01A + FS8205A) OMITTED: the EEMB LP603449 ships with its own integrated
+# protection PCB, so an on-board series stage is redundant (extra Rds(on) loss + nuisance-trip
+# risk) -- and the previous topology was wrong. Cell- ties straight to GND. To re-add, use a
+# known-good ref (FS8205: 1 G1,2 S1,3 D,4 G2,5 S2,6 D; OD->cell- FET gate, OC->P- FET gate).
 
 # Connectors (hand-soldered)
 usbc = ic("USB-C-16P","J","Connector_USB:USB_C_Receptacle_XKB_U262-16XN-4BVC11",[
@@ -145,8 +148,11 @@ dbtn = ic("BAT54","D","Diode_SMD:D_SOD-323",[("1","K",PAS),("2","A",PAS)],"DBTN"
 usbc["VBUS"] += VBUS; usbc["GND"] += GND; usbc["SH"] += GND
 Rcc1=R(value="5k1",tag="Rcc1"); Rcc2=R(value="5k1",tag="Rcc2")
 usbc["CC1"]+=Rcc1[1]; Rcc1[2]+=GND; usbc["CC2"]+=Rcc2[1]; Rcc2[2]+=GND
-usbc["DP1"]+=esd["IO1"]; usbc["DM1"]+=esd["IO2"]; esd["VBUS"]+=VBUS; esd["GND"]+=GND
-esd["IO3"]+=n["USB_DP"]; esd["IO4"]+=n["USB_DM"]
+# D+ taps line I/O1 (esd pins 1&6), D- taps line I/O2 (pins 3&4). Tie both Type-C sides
+# (DP1/DP2, DM1/DM2) so USB data works in either cable orientation.
+usbc["DP1"]+=n["USB_DP"]; usbc["DP2"]+=n["USB_DP"]; esd["IO1"]+=n["USB_DP"]
+usbc["DM1"]+=n["USB_DM"]; usbc["DM2"]+=n["USB_DM"]; esd["IO2"]+=n["USB_DM"]
+esd["VBUS"]+=VBUS; esd["GND"]+=GND
 Cvbus=C4(value="100n",tag="Cvbus"); Cvbus[1]+=VBUS; Cvbus[2]+=GND
 
 # charger
@@ -160,14 +166,8 @@ chg["CHRG"]+=n["CHG_CHRG"]; chg["STDBY"]+=n["CHG_STBY"]
 Dc=LED(value="red",tag="Dchrg"); Rc=R(value="1k",tag="Rchrg"); Dc["A"]+=VBUS; Dc["K"]+=Rc[1]; Rc[2]+=n["CHG_CHRG"]
 Ds=LED(value="grn",tag="Dstby"); Rs=R(value="1k",tag="Rstby"); Ds["A"]+=VBUS; Ds["K"]+=Rs[1]; Rs[2]+=n["CHG_STBY"]
 
-# cell protection (OPTIONAL) : VBAT(charger/cell+) -> DW01 VCC ; pack B- through FS8205
-bat["P"]+=VBAT
-dw["VCC"]+=VBAT; Rdw=R(value="100R",tag="Rdw"); Cdw=C4(value="100n",tag="Cdw")
-# DW01 VCC filter
-Rdw[1]+=VBAT; Rdw[2]+=dw["VCC"]; Cdw[1]+=dw["VCC"]; Cdw[2]+=dw["GND"]
-dw["OD"]+=fs["G2"]; dw["OC"]+=fs["G1"]; dw["CS"]+=fs["S2"]
-dw["GND"]+=bat["N"]; fs["S1"]+=bat["N"]; fs["S1b"]+=bat["N"]  # B- side network [VERIFY topology]
-fs["S2"]+=GND; fs["S2b"]+=GND
+# Battery JST: cell+ = VBAT, cell- = GND (the LP603449's own protection PCB sits at the cell).
+bat["P"]+=VBAT; bat["N"]+=GND
 
 # soft-latch power path: Q_PWR (P-FET) VBAT -> VSYS, gate PWR_G (held off by R_G).
 qpwr["S"]+=VBAT; qpwr["D"]+=VSYS; qpwr["G"]+=n["PWR_G"]
@@ -214,6 +214,10 @@ esp["IO16"]+=n["TOUCH_SDA"]; esp["IO17"]+=n["TOUCH_SCL"]
 esp["IO1"]+=n["SD_CS"]; esp["IO2"]+=n["SD_MOSI"]; esp["IO42"]+=n["SD_CLK"]; esp["IO41"]+=n["SD_MISO"]
 esp["IO40"]+=n["NAV_UP"]; esp["IO39"]+=n["NAV_DN"]; esp["IO38"]+=n["NAV_L"]
 esp["IO47"]+=n["NAV_R"]; esp["IO21"]+=n["NAV_MID"]; esp["IO18"]+=n["AMP_EN"]
+# Headphone-detect on GPIO46 (module pin 17, far from the SD-bus corner so it doesn't
+# congest the microSD escape). GPIO46 is a strapping pin but is IGNORED in normal boot
+# (GPIO0 high); we flash over USB, not UART, and it's resistor-pulled (100k), not driven.
+esp["IO46"]+=n["HP_DET"]
 # battery voltage sense: VSYS -> 100k/100k divider -> GPIO3 (ADC1_CH2) + 100nF filter.
 # Reads VBAT/2 when the device is on; scale x2 in firmware. GPIO3 is a strapping pin.
 esp["IO3"]+=n["VBAT_SENSE"]
@@ -240,13 +244,20 @@ CdbL=C6(value="2u2",tag="CdbL"); CdbR=C6(value="2u2",tag="CdbR")
 n["OUTL"]+=RolL[1]; RolL[2]+=CdbL[1]; CdbL[2]+=n["HP_L"]
 n["OUTR"]+=RolR[1]; RolR[2]+=CdbR[1]; CdbR[2]+=n["HP_R"]
 hp["L"]+=n["HP_L"]; hp["R"]+=n["HP_R"]; hp["GND"]+=GND
+# Headphone-insert detect: the jack's tip-switch (TN) opens when a plug is inserted.
+# TN -> GPIO44 with a 100k pull-up; the tip (HP_L) gets a 20k pull-down that both DC-
+# references the AC-coupled output and gives the "no plug" LOW: switch closed (no plug)
+# pulls GPIO44 to ~0.55V (LOW); plug inserted -> switch open -> pull-up -> HIGH.
+hp["TN"]+=n["HP_DET"]
+Rhpu=R(value="100k",tag="Rhpdet"); Rhpu[1]+=n["HP_DET"]; Rhpu[2]+=V3
+Rhpd=R(value="20k",tag="Rhptip"); Rhpd[1]+=n["HP_L"]; Rhpd[2]+=GND
 # amp: sum L+R into IN+
 RsumL=R(value="20k",tag="RsumL"); RsumR=R(value="20k",tag="RsumR")
 Cinp=C4(value="470n",tag="Campin"); Cinn=C4(value="470n",tag="Campinn")
 n["OUTL"]+=RsumL[1]; n["OUTR"]+=RsumR[1]; RsumL[2]+=n["AIN"]; RsumR[2]+=n["AIN"]
 n["AIN"]+=Cinp[1]; Cinp[2]+=amp["IN+"]
 amp["IN-"]+=Cinn[1]; Cinn[2]+=GND
-amp["VDD"]+=VSYS; amp["GND"]+=GND; amp["PGND"]+=GND
+amp["VDD"]+=VSYS; amp["GND"]+=GND   # PAM8302A MSOP-8 has a single GND (pin7); pin2 is NC
 Camp=C8(value="10u",tag="Campvdd"); Camp[1]+=VSYS; Camp[2]+=GND
 Campd=C4(value="100n",tag="Campd"); Campd[1]+=VSYS; Campd[2]+=GND
 amp["SD"]+=n["AMP_EN"]; Rsd=R(value="100k",tag="Rampsd"); Rsd[1]+=n["AMP_EN"]; Rsd[2]+=GND

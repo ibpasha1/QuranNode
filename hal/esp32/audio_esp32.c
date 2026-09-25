@@ -26,6 +26,8 @@
 #define MINIMP3_IMPLEMENTATION
 #include "minimp3_ex.h"
 
+#include "wsola.h"   // pitch-preserving time-stretch for recitation speed
+
 static const char *TAG = "AUDIO";
 #define OUT_RATE 44100
 
@@ -44,10 +46,27 @@ static mp3dec_t          s_dec;
 static HalAudioClip     *s_cur;
 static volatile bool     s_playing;
 static bool              s_i2s_ok;
+// Is the I2S channel currently enabled? At true idle we DISABLE it (stops the
+// BCLK/WS/DATA clock) and drop the amp so the device is electrically silent —
+// otherwise a running I2S clock + class-D amp idling on silence emits an audible
+// switching "drone/click". Toggled only from the audio task. See the idle branch
+// in audio_task and i2s_resume().
+static bool              s_i2s_running;
 
 // Decode scratch (static, not on the audio task's stack).
 static int16_t s_pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
 static int16_t s_stereo[MINIMP3_MAX_SAMPLES_PER_FRAME * 2];
+
+// Recitation-speed time-stretch. Playback rate lives in s_rate (1.0 = normal,
+// which BYPASSES WSOLA entirely so default playback is bit-for-bit unchanged);
+// only a non-1.0 rate routes decoded PCM through the pitch-preserving stretcher.
+static WsolaState    s_ws;
+static volatile float s_rate = 1.0f;
+static HalAudioClip *s_ws_clip;            // last clip the stretcher saw
+static volatile bool s_ws_reset_req;       // seek asks the audio task to flush
+#define WS_PULL 1024   // <= MINIMP3_MAX_SAMPLES_PER_FRAME, so s_stereo fits a batch
+static int16_t s_ws_out[WS_PULL * WS_MAXCH];
+static inline bool rate_is_bypass(void) { return s_rate > 0.999f && s_rate < 1.001f; }
 
 // Software volume/gain, Q8 fixed point (256 = 1.0x). Default ~1.8x because the
 // recitation MP3s sit ~6 dB below full scale and line-out into a speaker is quiet.
@@ -55,11 +74,19 @@ static int16_t s_stereo[MINIMP3_MAX_SAMPLES_PER_FRAME * 2];
 static int32_t s_vol_q8 = 460;
 static inline int16_t sat16(int32_t v) { return v > 32767 ? 32767 : (v < -32768 ? -32768 : (int16_t)v); }
 
-// Output routing: the PAM8302 speaker amp (PIN_AMP_EN) is only enabled during
-// playback when in Speaker mode; Headphone mode keeps it off (DAC line-out only).
-static bool s_output_speaker = false;
+// Output routing. Mode: 0 = headphone (amp always off), 1 = speaker (amp on when
+// playing), 2 = auto (follow the jack-detect pin). In auto, inserting a plug (GPIO46
+// reads HIGH) routes to the line-out jack and mutes the amp.
+static int s_output_mode = 2;   // auto
 
-static void spk(bool on) { gpio_set_level(PIN_AMP_EN, (s_output_speaker && on) ? 1 : 0); }
+static inline bool hp_present(void) { return gpio_get_level(PIN_HP_DETECT) != 0; }
+static inline bool use_speaker(void) {
+    if (s_output_mode == 1) return true;             // forced speaker
+    if (s_output_mode == 0) return false;            // forced headphone
+    return !hp_present();                            // auto: speaker unless a plug is in
+}
+
+static void spk(bool on) { gpio_set_level(PIN_AMP_EN, (use_speaker() && on) ? 1 : 0); }
 
 // The I2S rate currently programmed into the hardware. Retune it to a stream's
 // real sample rate (disable -> reconfig clock -> enable), but only when it
@@ -78,6 +105,15 @@ static void set_out_rate(int hz)
     else             { ESP_LOGE(TAG, "I2S reconfig %dHz failed (%d)", hz, (int)e); }
 }
 
+// Re-enable the I2S clock if the idle path parked it. Audio-task only, called
+// before any path that writes to I2S (playback, user PCM, UI click).
+static void i2s_resume(void)
+{
+    if (s_i2s_ok && !s_i2s_running) {
+        if (i2s_channel_enable(s_tx) == ESP_OK) s_i2s_running = true;
+    }
+}
+
 bool audio_esp32_pcm_pump(void);   // user-recording playback (defined below)
 
 // --- UI click tick ---------------------------------------------------------
@@ -89,10 +125,26 @@ bool audio_esp32_pcm_pump(void);   // user-recording playback (defined below)
 // "linger" after each tick, meaning a burst of menu taps pops the amp once.
 #define CLICK_MAX        1024    // samples; ~23ms @44.1k, caps a ~12ms tick
 #define CLICK_LINGER_MS  1200    // keep the amp on this long after the last tick
+// Amp/I2S hold across playback stops. When a clip ends under autoplay, the next
+// ayah starts within ~a UI frame; cutting the amp and parking the I2S clock in
+// that window pops the PAM8302 and hardens the gap at EVERY ayah boundary. So
+// end-of-clip / pause / close don't drop the amp — they arm this linger and the
+// idle branch keeps feeding silence with the amp on. If nothing follows (user
+// really stopped), the linger lapses and the idle path parks as before. Long
+// enough to also ride out short Loop-mode inter-ayah pauses.
+#define TRANS_LINGER_MS  1500
+// Silent buffers to flush before parking the I2S clock at idle. The default DMA
+// ring is dma_desc_num(6) * dma_frame_num(240) = 1440 frames; we write 128
+// frames/buffer, so 12 buffers (1536 frames) guarantees the last recitation PCM
+// is fully clocked out and replaced by zeros before we disable — no stop-click.
+#define IDLE_DRAIN_WRITES 12
 static int16_t      s_click[CLICK_MAX];
 static volatile int s_click_len;   // 0 = nothing queued
 static volatile int s_click_pos;
-static TickType_t   s_amp_off_at;  // idle path holds PIN_AMP_EN on until this tick
+// Idle path holds PIN_AMP_EN on until this tick. Written by the audio task
+// (clicks, end-of-clip) and the UI task (pause/close); aligned 32-bit stores
+// are atomic on Xtensa, and a torn read would only mistime the linger.
+static volatile TickType_t s_amp_off_at;
 
 // Add the queued tick into a stereo buffer (both channels), advancing the
 // cursor. Runs on the audio task; the UI task fills s_click under s_mtx.
@@ -111,6 +163,30 @@ static void mix_click(int16_t *stereo, int frames)
     xSemaphoreGive(s_mtx);
 }
 
+// Apply gain, up-mix mono->stereo, fold in any queued UI tick, and clock `n`
+// frames of `ch`-channel PCM out to the I2S DMA. Shared by the normal
+// (bypass) path and the time-stretched path. `pcm` for stereo is modified
+// in place; mono is written into s_stereo.
+static void emit_frames(int16_t *pcm, int n, int ch)
+{
+    if (n <= 0) return;
+    const int32_t g = s_vol_q8;
+    int16_t *buf;
+    if (ch == 1) {                 // up-mix mono -> stereo, with gain
+        for (int i = 0; i < n; i++) {
+            int16_t s = sat16((pcm[i] * g) >> 8);
+            s_stereo[i * 2] = s; s_stereo[i * 2 + 1] = s;
+        }
+        buf = s_stereo;
+    } else {                       // stereo: gain in place
+        for (int i = 0; i < n * 2; i++) pcm[i] = sat16((pcm[i] * g) >> 8);
+        buf = pcm;
+    }
+    mix_click(buf, n);             // fold in a UI tick if one is queued
+    size_t wr = 0;
+    i2s_channel_write(s_tx, buf, (size_t)n * 2 * sizeof(int16_t), &wr, portMAX_DELAY);
+}
+
 static void audio_task(void *arg)
 {
     (void)arg;
@@ -124,32 +200,64 @@ static void audio_task(void *arg)
         bool play = s_playing;
         xSemaphoreGive(s_mtx);
 
+        // Flush the stretcher's overlap buffers on a new clip or a seek, so an
+        // ayah never starts with tail grains from the previous one. Done here
+        // (audio task) since the stretcher is otherwise only touched here.
+        if (c != s_ws_clip || s_ws_reset_req) {
+            wsola_reset(&s_ws);
+            s_ws_clip = c;
+            s_ws_reset_req = false;
+        }
+
         if (!(s_i2s_ok && play && c)) {
-            // Not playing (paused / clip closed / between surahs): keep feeding the
-            // I2S DMA with SILENCE. Otherwise the DMA loops the last buffer of PCM
-            // and you hear a buzzy glitch on pause and when leaving the reader.
-            // Any pending UI click tick is folded into that silence.
-            if (s_i2s_ok) {
+            if (!s_i2s_ok) { vTaskDelay(pdMS_TO_TICKS(8)); continue; }
+
+            bool click = s_click_len > 0;
+            TickType_t now = xTaskGetTickCount();
+            bool linger = s_amp_off_at && now < s_amp_off_at;
+
+            if (click || linger) {
+                // Active idle: a UI tick is queued, or we're inside the post-click
+                // linger window. Feed the I2S DMA with SILENCE (+ any tick) so it
+                // never loops stale PCM (the buzz on pause / leaving the reader),
+                // and hold the amp on across the linger so a burst of menu taps
+                // pops PIN_AMP_EN once, not once per tap.
+                i2s_resume();
                 int16_t out[256];              // 128 stereo frames (~2.9ms @44.1k)
                 memset(out, 0, sizeof(out));
-                if (s_click_len > 0) {
+                if (click) {
                     mix_click(out, 128);
-                    s_amp_off_at = xTaskGetTickCount() + pdMS_TO_TICKS(CLICK_LINGER_MS);
+                    s_amp_off_at = now + pdMS_TO_TICKS(CLICK_LINGER_MS);
                 }
-                // Hold the amp on through the tick and its linger window so a run
-                // of menu taps pops PIN_AMP_EN once, not once per click.
-                bool amp = s_output_speaker && s_amp_off_at &&
-                           xTaskGetTickCount() < s_amp_off_at;
-                gpio_set_level(PIN_AMP_EN, amp ? 1 : 0);
+                gpio_set_level(PIN_AMP_EN, use_speaker() ? 1 : 0);
                 size_t wr;
                 i2s_channel_write(s_tx, out, sizeof(out), &wr, pdMS_TO_TICKS(20));
+            } else if (s_i2s_running) {
+                // Nothing to play and the linger window has closed. Flush the ring
+                // with silence (so the last thing clocked out is zeros — no click
+                // on stop), then CUT the amp and STOP the I2S clock. This is what
+                // kills the idle drone: a parked device makes no sound and draws no
+                // class-D / DMA switching noise. It wakes again via i2s_resume().
+                int16_t out[256]; memset(out, 0, sizeof(out)); size_t wr;
+                for (int i = 0; i < IDLE_DRAIN_WRITES; i++)
+                    i2s_channel_write(s_tx, out, sizeof(out), &wr, pdMS_TO_TICKS(20));
+                gpio_set_level(PIN_AMP_EN, 0);
+                i2s_channel_disable(s_tx);
+                s_i2s_running = false;
             } else {
+                // Parked: I2S clock stopped, amp off. Sleep cheaply; the next UI
+                // click or playback re-enables the clock via i2s_resume().
                 vTaskDelay(pdMS_TO_TICKS(8));
             }
             continue;
         }
         if (c->rd_pos >= c->mp3_len) {   // reached the end
-            s_playing = false; spk(false);
+            s_playing = false;
+            // Don't cut the amp: autoplay's next ayah starts within ~a UI
+            // frame, and the linger keeps the amp powered + I2S clocking
+            // silence across the handoff — no pop, no clock restart. A real
+            // stop just lets the linger lapse into the normal idle park.
+            s_amp_off_at = xTaskGetTickCount() + pdMS_TO_TICKS(TRANS_LINGER_MS);
             continue;
         }
 
@@ -171,40 +279,120 @@ static void audio_task(void *arg)
         xSemaphoreGive(s_mtx);
 
         if (samples > 0) {
-            set_out_rate(fi.hz);   // match the I2S clock to this stream's rate
-            const int32_t g = s_vol_q8;
-            int16_t *buf;
-            if (fi.channels == 1) {   // up-mix mono -> stereo, with gain
-                for (int i = 0; i < samples; i++) {
-                    int16_t s = sat16((s_pcm[i] * g) >> 8);
-                    s_stereo[i*2] = s; s_stereo[i*2+1] = s;
+            i2s_resume();          // wake the clock if the idle path parked it
+            set_out_rate(fi.hz);   // I2S clock stays at the stream's real rate —
+                                   // WSOLA changes DURATION, not pitch, so this
+                                   // is correct at any speed.
+            if (rate_is_bypass()) {
+                emit_frames(s_pcm, samples, fi.channels);   // normal speed
+            } else {
+                // Route the decoded frame through the pitch-preserving stretcher.
+                if (s_ws.ch != fi.channels) wsola_init(&s_ws, fi.channels);
+                wsola_set_rate(&s_ws, s_rate);
+                int off = 0;
+                while (off < samples) {
+                    int acc = wsola_feed(&s_ws, s_pcm + (size_t)off * fi.channels,
+                                         samples - off);
+                    off += acc;
+                    int got;
+                    while ((got = wsola_pull(&s_ws, s_ws_out, WS_PULL)) > 0)
+                        emit_frames(s_ws_out, got, fi.channels);
+                    if (acc == 0) break;   // FIFO full but drained nothing: bail
                 }
-                buf = s_stereo;
-            } else {                  // stereo, apply gain in place
-                for (int i = 0; i < samples * 2; i++) s_pcm[i] = sat16((s_pcm[i] * g) >> 8);
-                buf = s_pcm;
-            }
-            mix_click(buf, samples);   // fold in a UI tick if one is queued
-            size_t bytes = (size_t)samples * 2 * sizeof(int16_t);
-            size_t wr = 0;
-            i2s_channel_write(s_tx, buf, bytes, &wr, portMAX_DELAY);
-            // Temporary audio-path debug: prove decode+I2S are actually running.
-            static uint32_t nfr = 0;
-            if ((nfr++ % 40) == 0) {   // ~1s
-                int16_t peak = 0;
-                for (int i = 0; i < samples; i++) { int16_t a = s_pcm[i] < 0 ? -s_pcm[i] : s_pcm[i]; if (a > peak) peak = a; }
-                ESP_LOGI(TAG, "audio: %uHz ch%d frame=%dB wrote=%u/%u peak=%d",
-                         (unsigned)fi.hz, fi.channels, fi.frame_bytes, (unsigned)wr, (unsigned)bytes, (int)peak);
             }
         }
+    }
+}
+
+// --- Async clip prefetch ---------------------------------------------------
+// The next ayah's whole MP3 is slurped from SD on a low-priority worker while
+// the current ayah is still playing, so hal_audio_open() for that path returns
+// instantly instead of stalling on a multi-MB SD read at the transition — that
+// stall is the audible gap between ayat, and the SD burst also starved the
+// reader's glyph reads ("this ayah isn't on the SD card"). One slot; only the
+// most recent request is honoured, and a miss just falls back to a sync open.
+static SemaphoreHandle_t s_pf_mtx;
+static char     s_pf_req[96];    // requested path, "" = nothing pending
+static uint8_t *s_pf_buf;        // published ready bytes, NULL = none
+static size_t   s_pf_len;
+static char     s_pf_path[96];   // the path s_pf_buf holds
+
+// Opener side: take the ready buffer if it matches `rel`. If it holds some OTHER
+// path we navigated away from, drop it so a stale 2MB slurp can't linger.
+static bool pf_take(const char *rel, uint8_t **buf, size_t *len)
+{
+    if (!s_pf_mtx) return false;   // opened before audio init: no prefetch yet
+    bool hit = false;
+    xSemaphoreTake(s_pf_mtx, portMAX_DELAY);
+    if (s_pf_buf && strcmp(s_pf_path, rel) == 0) {
+        *buf = s_pf_buf; *len = s_pf_len;
+        s_pf_buf = NULL; s_pf_path[0] = 0;
+        hit = true;
+    } else if (s_pf_buf) {
+        free(s_pf_buf); s_pf_buf = NULL; s_pf_path[0] = 0;
+    }
+    xSemaphoreGive(s_pf_mtx);
+    return hit;
+}
+
+void hal_audio_prefetch(const char *rel)
+{
+    if (!rel || !s_pf_mtx) return;
+    xSemaphoreTake(s_pf_mtx, portMAX_DELAY);
+    // Already have it, or already loading it? nothing to do.
+    if ((s_pf_buf && strcmp(s_pf_path, rel) == 0) ||
+        (s_pf_req[0] && strcmp(s_pf_req, rel) == 0)) {
+        xSemaphoreGive(s_pf_mtx);
+        return;
+    }
+    // New target: drop any ready buffer for a different path before we start.
+    if (s_pf_buf) { free(s_pf_buf); s_pf_buf = NULL; s_pf_path[0] = 0; }
+    strncpy(s_pf_req, rel, sizeof(s_pf_req) - 1);
+    s_pf_req[sizeof(s_pf_req) - 1] = 0;
+    xSemaphoreGive(s_pf_mtx);
+}
+
+static void prefetch_task(void *arg)
+{
+    (void)arg;
+    while (1) {
+        char req[96];
+        req[0] = 0;
+        xSemaphoreTake(s_pf_mtx, portMAX_DELAY);
+        if (s_pf_req[0]) { strcpy(req, s_pf_req); s_pf_req[0] = 0; }
+        xSemaphoreGive(s_pf_mtx);
+
+        if (!req[0]) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+
+        // Slurp outside the lock — this is the multi-MB SD read we're hiding.
+        uint8_t *buf = NULL; size_t len = 0;
+        if (!hal_fs_slurp(req, &buf, &len)) continue;   // miss: opener falls back
+
+        xSemaphoreTake(s_pf_mtx, portMAX_DELAY);
+        // Publish only if the player still wants this exact clip — a newer
+        // request that arrived mid-read supersedes us.
+        if (!s_pf_req[0] || strcmp(s_pf_req, req) == 0) {
+            if (s_pf_buf) free(s_pf_buf);   // replace any older ready buffer
+            s_pf_buf = buf; s_pf_len = len; strcpy(s_pf_path, req);
+            s_pf_req[0] = 0;
+            buf = NULL;
+        }
+        xSemaphoreGive(s_pf_mtx);
+        if (buf) free(buf);   // superseded — discard
     }
 }
 
 void audio_esp32_init(void)
 {
     s_mtx = xSemaphoreCreateMutex();
+    s_pf_mtx = xSemaphoreCreateMutex();
     mp3dec_init(&s_dec);
     gpio_set_direction(PIN_AMP_EN, GPIO_MODE_OUTPUT);
+    // Headphone-detect input. GPIO46 defaults to the UART/strap function; reset it to a
+    // plain input and disable internal pulls (the external 100k/20k network sets levels).
+    gpio_reset_pin(PIN_HP_DETECT);
+    gpio_set_direction(PIN_HP_DETECT, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(PIN_HP_DETECT, GPIO_FLOATING);
     spk(false);
 
     i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -218,23 +406,35 @@ void audio_esp32_init(void)
     if (i2s_channel_init_std_mode(s_tx, &sc) != ESP_OK) { ESP_LOGE(TAG, "i2s init failed"); return; }
     i2s_channel_enable(s_tx);
     s_i2s_ok = true;
+    s_i2s_running = true;
     // Big stack: mp3dec_decode_frame puts an ~18KB scratch struct on the stack.
     xTaskCreatePinnedToCore(audio_task, "audio", 32768, NULL, 5, NULL, 1);
+    // Low-priority SD prefetcher on the app core; it only ever blocks on reads.
+    xTaskCreatePinnedToCore(prefetch_task, "audio_pf", 4096, NULL, 3, NULL, 0);
     ESP_LOGI(TAG, "I2S ready (streaming MP3; BCK%d WS%d DOUT%d SPK%d)",
              PIN_I2S_BCK, PIN_I2S_WS, PIN_I2S_DATA, PIN_AMP_EN);
 }
 
-// Open is cheap now — just keep the bytes; decoding happens during playback.
-HalAudioClip *hal_audio_open(const char *rel)
+// Wrap already-slurped MP3 bytes in a clip. hz starts at 0 so the decoder fills
+// in the stream's REAL rate on the first frame; pos_ms then divides played-
+// samples by the true rate (a 22.05kHz file left at 44100 here would report 2x
+// position and desync the word highlight). Takes ownership of `buf`.
+static HalAudioClip *clip_from_bytes(uint8_t *buf, size_t len)
 {
-    uint8_t *buf; size_t len;
-    if (!hal_fs_slurp(rel, &buf, &len)) { ESP_LOGE(TAG, "no audio: %s", rel); return NULL; }
     HalAudioClip *c = calloc(1, sizeof(*c));
-    // hz starts at 0 so the decoder fills in the stream's REAL rate on the first
-    // frame; pos_ms then divides played-samples by the true rate (a 22.05kHz file
-    // left at 44100 here would report 2x position and desync the word highlight).
+    if (!c) { free(buf); return NULL; }
     c->mp3 = buf; c->mp3_len = len; c->rd_pos = 0; c->hz = 0; c->played = 0; c->len_ms = 0;
     return c;
+}
+
+// Open is cheap now — just keep the bytes; decoding happens during playback. If
+// the prefetcher already slurped this path, take those bytes and skip the read.
+HalAudioClip *hal_audio_open(const char *rel)
+{
+    uint8_t *buf = NULL; size_t len = 0;
+    if (pf_take(rel, &buf, &len)) return clip_from_bytes(buf, len);
+    if (!hal_fs_slurp(rel, &buf, &len)) { ESP_LOGE(TAG, "no audio: %s", rel); return NULL; }
+    return clip_from_bytes(buf, len);
 }
 
 void hal_audio_close(HalAudioClip *c)
@@ -243,7 +443,10 @@ void hal_audio_close(HalAudioClip *c)
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     if (s_cur == c) { s_cur = NULL; s_playing = false; }
     xSemaphoreGive(s_mtx);
-    spk(false);
+    // Ayah transitions close the old clip microseconds before playing the next
+    // one — an amp cut here would blip PIN_AMP_EN low at every boundary. Let
+    // the linger carry the amp across; a real close parks via the idle path.
+    s_amp_off_at = xTaskGetTickCount() + pdMS_TO_TICKS(TRANS_LINGER_MS);
     if (c->mp3) free(c->mp3);
     free(c);
 }
@@ -262,7 +465,14 @@ void hal_audio_play(HalAudioClip *c)
     ESP_LOGI(TAG, "play: clip=%uB i2s_ok=%d amp_en(GPIO%d)=1", (unsigned)c->mp3_len, s_i2s_ok, PIN_AMP_EN);
 }
 
-void hal_audio_pause(HalAudioClip *c) { (void)c; s_playing = false; spk(false); }
+void hal_audio_pause(HalAudioClip *c)
+{
+    (void)c;
+    s_playing = false;
+    // Linger instead of an instant amp cut: pause stops the sound (idle branch
+    // feeds silence) without popping the amp, and a quick resume is seamless.
+    s_amp_off_at = xTaskGetTickCount() + pdMS_TO_TICKS(TRANS_LINGER_MS);
+}
 bool hal_audio_is_playing(HalAudioClip *c) { (void)c; return s_playing; }
 bool hal_audio_active(void) { return s_playing; }
 
@@ -293,19 +503,29 @@ void hal_audio_seek_ms(HalAudioClip *c, uint32_t ms)
     c->rd_pos = 0; c->played = 0;
     if (s_cur == c) mp3dec_init(&s_dec);
     xSemaphoreGive(s_mtx);
+    s_ws_reset_req = true;   // audio task flushes the stretcher's stale grains
 }
 
-void hal_audio_set_rate(HalAudioClip *c, float rate) { (void)c; (void)rate; }  // time-stretch: TODO
+void hal_audio_set_rate(HalAudioClip *c, float rate)
+{
+    (void)c;
+    if (rate < 0.5f) rate = 0.5f;
+    if (rate > 2.0f) rate = 2.0f;
+    s_rate = rate;              // audio task reads this; 1.0 bypasses WSOLA
+    wsola_set_rate(&s_ws, rate);
+}
 void hal_audio_set_volume(float vol) {   // gain multiplier (1.0 = unity; >1 boosts, may clip)
     if (vol < 0.0f) vol = 0.0f;
     if (vol > 4.0f) vol = 4.0f;
     s_vol_q8 = (int32_t)(vol * 256.0f + 0.5f);
 }
 
-void hal_audio_set_output(int speaker) {
-    s_output_speaker = (speaker != 0);
-    if (!s_output_speaker) gpio_set_level(PIN_AMP_EN, 0);   // mute amp in headphone mode
+void hal_audio_set_output(int mode) {
+    s_output_mode = mode;                         // 0 headphone, 1 speaker, 2 auto
+    if (!use_speaker()) gpio_set_level(PIN_AMP_EN, 0);   // mute amp now if not on speaker
 }
+
+int hal_audio_headphone_present(void) { return hp_present() ? 1 : 0; }
 
 // UI click: render a short decaying-sine tick at the current output rate and
 // queue it; the audio task mixes it into the I2S stream (see mix_click) and
@@ -323,10 +543,15 @@ void hal_audio_click(bool accent)
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     s_click_len = 0;
     xSemaphoreGive(s_mtx);
+    // Scale the tick by the master volume so lowering the volume lowers the UI
+    // clicks too (and 0 mutes them). s_vol_q8: 256 = 1.0x. Cap at 1.0 so the tick
+    // never exceeds its tuned 0.16 baseline — we only ever scale it DOWN.
+    float g = s_vol_q8 / 256.0f;
+    if (g > 1.0f) g = 1.0f;
     for (int i = 0; i < n; i++) {
         float t = (float)i / (float)hz;
-        float v = 0.16f * expf(-t * 420.0f) * sinf(6.2831853f * freq * t);
-        s_click[i] = (int16_t)(v * 32767.0f);
+        float v = 0.16f * g * expf(-t * 420.0f) * sinf(6.2831853f * freq * t);
+        s_click[i] = sat16((int32_t)(v * 32767.0f));
     }
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     s_click_pos = 0;
@@ -532,11 +757,13 @@ bool audio_esp32_pcm_pump(void)
     xSemaphoreGive(s_mtx);
 
     if (of > 0) {
+        i2s_resume();             // wake the clock if the idle path parked it
         set_out_rate(OUT_RATE);   // this path upsamples to OUT_RATE stereo
         spk(true);
         size_t wr;
         i2s_channel_write(s_tx, buf, (size_t)of * 4, &wr, pdMS_TO_TICKS(40));
     }
-    if (done && !clip_playing) spk(false);
+    if (done && !clip_playing)   // linger, don't pop (see TRANS_LINGER_MS)
+        s_amp_off_at = xTaskGetTickCount() + pdMS_TO_TICKS(TRANS_LINGER_MS);
     return of > 0;
 }

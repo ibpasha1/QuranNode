@@ -125,6 +125,19 @@ for ref in REF_ANCHOR:                               # anchors first, at their e
         hw,hh=half_ext(fp_objs[ref]); ow,oh=occ_ext(fp_objs[ref])
         pos[ref]=place(*REF_ANCHOR[ref], hw, hh, ow, oh)
 anchor_xy = dict(pos)
+# The microSD pull-ups (SD_CS/SD_MOSI/SD_MISO) share the huge +3V3 net, so the plain
+# centroid drags them to the power cluster (far from J2) and FR can't route SD_MISO.
+# Pin any R that touches an SD signal net next to J2 (microSD), before the centroid pass.
+SD_SIGS = {"SD_CS","SD_MOSI","SD_MISO","SD_CLK"}
+SD_ANCHOR = REF_ANCHOR.get("J2")
+for ref in comps:
+    if ref.startswith("R") and SD_ANCHOR and (ref_nets.get(ref,()) & SD_SIGS):
+        REF_ANCHOR.setdefault(ref, SD_ANCHOR)
+for ref in list(REF_ANCHOR):                         # (re)place any newly-anchored SD pull-ups
+    if ref in fp_objs and ref not in pos:
+        hw,hh=half_ext(fp_objs[ref]); ow,oh=occ_ext(fp_objs[ref])
+        pos[ref]=place(*REF_ANCHOR[ref], hw, hh, ow, oh)
+        anchor_xy[ref]=pos[ref]
 for ref in comps:                                    # rest: centroid of connected anchors
     if ref in pos or ref not in fp_objs: continue
     axy=[anchor_xy[o] for nm in ref_nets.get(ref,()) for o,_ in nets[nm] if o in anchor_xy]
