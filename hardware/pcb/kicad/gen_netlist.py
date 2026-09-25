@@ -24,7 +24,7 @@ n = {name: Net(name) for name in [
     "DISP_CS","DISP_MOSI","DISP_CLK","DISP_DC","DISP_RST","DISP_BL","BL_G",
     "TOUCH_SDA","TOUCH_SCL","SD_CS","SD_MOSI","SD_CLK","SD_MISO",
     "NAV_UP","NAV_DN","NAV_L","NAV_R","NAV_MID","AMP_EN",
-    "OUTL","OUTR","AIN","SPK_P","SPK_N","HP_L","HP_R",
+    "OUTL","OUTR","AIN","SPK_P","SPK_N","HP_L","HP_R","HP_DET",
     "EN","IO0","CHG_CHRG","CHG_STBY","PG","VBAT_SENSE",
     "PWR_G","PWR_HOLD","HOLD_G",
 ]}
@@ -214,6 +214,10 @@ esp["IO16"]+=n["TOUCH_SDA"]; esp["IO17"]+=n["TOUCH_SCL"]
 esp["IO1"]+=n["SD_CS"]; esp["IO2"]+=n["SD_MOSI"]; esp["IO42"]+=n["SD_CLK"]; esp["IO41"]+=n["SD_MISO"]
 esp["IO40"]+=n["NAV_UP"]; esp["IO39"]+=n["NAV_DN"]; esp["IO38"]+=n["NAV_L"]
 esp["IO47"]+=n["NAV_R"]; esp["IO21"]+=n["NAV_MID"]; esp["IO18"]+=n["AMP_EN"]
+# Headphone-detect on GPIO46 (module pin 17, far from the SD-bus corner so it doesn't
+# congest the microSD escape). GPIO46 is a strapping pin but is IGNORED in normal boot
+# (GPIO0 high); we flash over USB, not UART, and it's resistor-pulled (100k), not driven.
+esp["IO46"]+=n["HP_DET"]
 # battery voltage sense: VSYS -> 100k/100k divider -> GPIO3 (ADC1_CH2) + 100nF filter.
 # Reads VBAT/2 when the device is on; scale x2 in firmware. GPIO3 is a strapping pin.
 esp["IO3"]+=n["VBAT_SENSE"]
@@ -240,6 +244,13 @@ CdbL=C6(value="2u2",tag="CdbL"); CdbR=C6(value="2u2",tag="CdbR")
 n["OUTL"]+=RolL[1]; RolL[2]+=CdbL[1]; CdbL[2]+=n["HP_L"]
 n["OUTR"]+=RolR[1]; RolR[2]+=CdbR[1]; CdbR[2]+=n["HP_R"]
 hp["L"]+=n["HP_L"]; hp["R"]+=n["HP_R"]; hp["GND"]+=GND
+# Headphone-insert detect: the jack's tip-switch (TN) opens when a plug is inserted.
+# TN -> GPIO44 with a 100k pull-up; the tip (HP_L) gets a 20k pull-down that both DC-
+# references the AC-coupled output and gives the "no plug" LOW: switch closed (no plug)
+# pulls GPIO44 to ~0.55V (LOW); plug inserted -> switch open -> pull-up -> HIGH.
+hp["TN"]+=n["HP_DET"]
+Rhpu=R(value="100k",tag="Rhpdet"); Rhpu[1]+=n["HP_DET"]; Rhpu[2]+=V3
+Rhpd=R(value="20k",tag="Rhptip"); Rhpd[1]+=n["HP_L"]; Rhpd[2]+=GND
 # amp: sum L+R into IN+
 RsumL=R(value="20k",tag="RsumL"); RsumR=R(value="20k",tag="RsumR")
 Cinp=C4(value="470n",tag="Campin"); Cinn=C4(value="470n",tag="Campinn")

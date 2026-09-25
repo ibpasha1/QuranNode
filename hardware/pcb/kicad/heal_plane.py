@@ -24,10 +24,11 @@ def mm(v): return pcbnew.FromMM(v)
 # unconnected pairs + union-find, snapped to nearest +3V3 via). Bridge 3 has an elbow
 # waypoint to detour two vias @ x~19.04, y137.3/138.0.
 BRIDGES = [
-    [(11.058, 103.357), (15.541, 104.821)],                       # audio row island -> main
-    [(20.322, 103.637), (15.541, 104.821)],                       # audio row island -> main
-    [(17.839, 141.225), (18.000, 138.000), (19.171, 136.018)],    # amp island (elbow past x19 vias)
-    [(18.020, 110.010), (15.961, 108.223)],                       # sliver island -> main
+    [(21.057, 104.519), (19.000, 103.600), (14.582, 103.587)],    # audio row (dip below GND via @17.08,104.82)
+    [(42.931, 107.601), (36.819, 104.451)],                       # reg/amp row island -> main
+    [(11.060, 103.630), (14.582, 103.587)],                       # sliver -> main
+    [(18.020, 110.010), (15.961, 108.223)],                       # sliver -> main
+    [(29.070, 103.990), (30.030, 104.800), (33.130, 103.860)],    # sliver (elbow past via)
 ]
 
 b   = pcbnew.LoadBoard(PCB)

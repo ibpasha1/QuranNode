@@ -19,10 +19,140 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-enum { S_SPEED, S_VOLUME, S_OUTPUT, S_FONT, S_BRIGHT, S_TAJWEED, S_UPDATE, S_COUNT };
+enum { S_SPEED, S_VOLUME, S_OUTPUT, S_FONT, S_BRIGHT, S_TAJWEED,
+       S_LOCATION, S_DST, S_SETCLOCK, S_WIFI, S_PUSH, S_UPDATE, S_COUNT };
+
+// Overlays layered over the field list (same idea as the old s_ota bool).
+enum { MODE_MAIN, MODE_OTA, MODE_CITY, MODE_CLOCK };
+static int s_mode;
 
 static int  s_sel;
-static bool s_ota;   // firmware-update overlay active (Wi-Fi + upload server up)
+
+// --- Location city table ---------------------------------------------------
+// A short world list so location + time zone can be set without typing. `tz` is
+// the STANDARD-time UTC offset in minutes; the separate Daylight-saving toggle
+// adds an hour in summer. Picking a city sets lat/lng and tz_std_min at once.
+typedef struct { const char *name; float lat, lng; int16_t tz; } City;
+static const City CITIES[] = {
+    { "Mecca",         21.4225f,  39.8262f,  180 },
+    { "Medina",        24.4700f,  39.6100f,  180 },
+    { "New York",      40.7100f, -74.0100f, -300 },
+    { "Chicago",       41.8500f, -87.6500f, -360 },
+    { "Denver",        39.7400f,-104.9900f, -420 },
+    { "Los Angeles",   34.0500f,-118.2400f, -480 },
+    { "Toronto",       43.6500f, -79.3800f, -300 },
+    { "Mexico City",   19.4300f, -99.1300f, -360 },
+    { "Sao Paulo",    -23.5500f, -46.6300f, -180 },
+    { "London",        51.5100f,  -0.1300f,    0 },
+    { "Paris",         48.8600f,   2.3500f,   60 },
+    { "Berlin",        52.5200f,  13.4100f,   60 },
+    { "Cairo",         30.0400f,  31.2400f,  120 },
+    { "Istanbul",      41.0100f,  28.9800f,  180 },
+    { "Riyadh",        24.7100f,  46.6800f,  180 },
+    { "Dubai",         25.2000f,  55.2700f,  240 },
+    { "Karachi",       24.8600f,  67.0100f,  300 },
+    { "Delhi",         28.6100f,  77.2300f,  330 },
+    { "Dhaka",         23.8100f,  90.4100f,  360 },
+    { "Jakarta",       -6.2100f, 106.8500f,  420 },
+    { "Kuala Lumpur",   3.1400f, 101.6900f,  480 },
+    { "Singapore",      1.3500f, 103.8200f,  480 },
+    { "Beijing",       39.9000f, 116.4100f,  480 },
+    { "Tokyo",         35.6800f, 139.7700f,  540 },
+    { "Sydney",       -33.8700f, 151.2100f,  600 },
+    { "Auckland",     -36.8500f, 174.7600f,  720 },
+};
+#define N_CITIES ((int)(sizeof(CITIES) / sizeof(CITIES[0])))
+
+static int s_city_sel;   // cursor in the city picker
+
+// Nearest city to the current lat/lng, for showing a name on the Location row.
+static int nearest_city(void)
+{
+    int best = 0; float bestd = 1e18f;
+    for (int i = 0; i < N_CITIES; i++) {
+        float dla = CITIES[i].lat - g_prefs.lat, dlo = CITIES[i].lng - g_prefs.lng;
+        float d = dla * dla + dlo * dlo;
+        if (d < bestd) { bestd = d; best = i; }
+    }
+    return best;
+}
+
+// --- Manual clock editor ---------------------------------------------------
+static int s_clk[5];   // local Y, Mon(1-12), Day(1-31), Hour(0-23), Min(0-59)
+static int s_clk_f;    // selected field 0..4
+
+// Proleptic Gregorian civil<->days (Howard Hinnant), dependency-free so it
+// works identically on device and in the sim without timegm/mktime tz quirks.
+static int64_t days_from_civil(int y, int m, int d)
+{
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int yoe = (int)(y - era * 400);
+    int doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static void civil_from_days(int64_t z, int *y, int *m, int *d)
+{
+    z += 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    int doe = (int)(z - era * 146097);
+    int yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int yy = yoe + (int)era * 400;
+    int doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int mp = (5 * doy + 2) / 153;
+    int dd = doy - (153 * mp + 2) / 5 + 1;
+    int mm = mp < 10 ? mp + 3 : mp - 9;
+    *y = yy + (mm <= 2); *m = mm; *d = dd;
+}
+
+static int days_in_month(int y, int m)
+{
+    static const int dim[] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+    if (m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) return 29;
+    return dim[(m - 1) % 12];
+}
+
+// Seed the editor from the current local time, or a sane date if unset.
+static void clock_editor_open(void)
+{
+    int64_t e = hal_wall_clock();
+    int tz = prefs_tz_offset_min();
+    if (e > 0) {
+        int64_t local = e + (int64_t)tz * 60;
+        int64_t days = local / 86400; int rem = (int)(local - days * 86400);
+        if (rem < 0) { rem += 86400; days--; }
+        civil_from_days(days, &s_clk[0], &s_clk[1], &s_clk[2]);
+        s_clk[3] = rem / 3600; s_clk[4] = (rem % 3600) / 60;
+    } else {
+        s_clk[0] = 2026; s_clk[1] = 1; s_clk[2] = 1; s_clk[3] = 12; s_clk[4] = 0;
+    }
+    s_clk_f = 0;
+}
+
+// Apply the editor: local Y/M/D H:M -> UTC epoch -> hal_clock_set.
+static void clock_editor_apply(void)
+{
+    int tz = prefs_tz_offset_min();
+    int64_t local = days_from_civil(s_clk[0], s_clk[1], s_clk[2]) * 86400
+                  + (int64_t)s_clk[3] * 3600 + (int64_t)s_clk[4] * 60;
+    hal_clock_set(local - (int64_t)tz * 60);
+}
+
+static void clock_editor_adjust(int dir)
+{
+    switch (s_clk_f) {
+    case 0: s_clk[0] += dir; if (s_clk[0] < 2020) s_clk[0] = 2020; if (s_clk[0] > 2099) s_clk[0] = 2099; break;
+    case 1: s_clk[1] += dir; if (s_clk[1] < 1) s_clk[1] = 12; if (s_clk[1] > 12) s_clk[1] = 1; break;
+    case 2: s_clk[2] += dir; { int dm = days_in_month(s_clk[0], s_clk[1]);
+            if (s_clk[2] < 1) s_clk[2] = dm; if (s_clk[2] > dm) s_clk[2] = 1; } break;
+    case 3: s_clk[3] += dir; if (s_clk[3] < 0) s_clk[3] = 23; if (s_clk[3] > 23) s_clk[3] = 0; break;
+    case 4: s_clk[4] += dir; if (s_clk[4] < 0) s_clk[4] = 59; if (s_clk[4] > 59) s_clk[4] = 0; break;
+    }
+    int dm = days_in_month(s_clk[0], s_clk[1]);   // month/year change can shorten the day
+    if (s_clk[2] > dm) s_clk[2] = dm;
+}
 
 static void adjust(int dir)
 {
@@ -43,8 +173,8 @@ static void adjust(int dir)
         hal_audio_set_volume(prefs_volume_gain());
         break;
     }
-    case S_OUTPUT:
-        g_prefs.output = dir > 0 ? 1 : (dir < 0 ? 0 : !g_prefs.output);
+    case S_OUTPUT:   // cycle 0 headphone -> 1 speaker -> 2 auto
+        g_prefs.output = (uint8_t)((g_prefs.output + (dir < 0 ? 2 : 1)) % 3);
         hal_audio_set_output(g_prefs.output);
         break;
     case S_FONT: {
@@ -65,6 +195,10 @@ static void adjust(int dir)
     case S_TAJWEED:
         g_prefs.tajweed = dir > 0 ? 1 : (dir < 0 ? 0 : !g_prefs.tajweed);
         break;
+    case S_DST:   // no-op while tz is Auto (offset comes from the platform)
+        if (g_prefs.tz_std_min != TZ_AUTO)
+            g_prefs.dst = dir > 0 ? 1 : (dir < 0 ? 0 : !g_prefs.dst);
+        break;
     }
 }
 
@@ -73,11 +207,37 @@ static void field(int i, char *label, char *value, int n)
     switch (i) {
     case S_SPEED:   snprintf(label, n, "Recitation speed"); snprintf(value, n, "%.2fx", g_prefs.rate); break;
     case S_VOLUME:  snprintf(label, n, "Volume");           snprintf(value, n, "%d%%", g_prefs.volume); break;
-    case S_OUTPUT:  snprintf(label, n, "Output");           snprintf(value, n, "%s", g_prefs.output ? "Speaker" : "Headphone"); break;
+    case S_OUTPUT:  snprintf(label, n, "Output");
+        snprintf(value, n, "%s", g_prefs.output == 1 ? "Speaker" :
+                                 g_prefs.output == 0 ? "Headphone" :
+                                 hal_audio_headphone_present() ? "Auto (Headphone)" : "Auto (Speaker)");
+        break;
     case S_FONT:    snprintf(label, n, "Font size");        snprintf(value, n, "%s", prefs_font_name()); break;
     case S_BRIGHT:  snprintf(label, n, "Brightness");       snprintf(value, n, "%d%%", g_prefs.brightness); break;
     case S_TAJWEED: snprintf(label, n, "Tajweed colors");   snprintf(value, n, "%s", g_prefs.tajweed ? "On" : "Off"); break;
-    case S_UPDATE:  snprintf(label, n, "Update firmware");  snprintf(value, n, "%s", "Wi-Fi >"); break;
+    case S_LOCATION: snprintf(label, n, "Location");        snprintf(value, n, "%s >", CITIES[nearest_city()].name); break;
+    case S_DST:     snprintf(label, n, "Daylight saving");
+        if (g_prefs.tz_std_min == TZ_AUTO) snprintf(value, n, "%s", "Auto");
+        else                               snprintf(value, n, "%s", g_prefs.dst ? "On" : "Off");
+        break;
+    case S_SETCLOCK: snprintf(label, n, "Set clock"); {
+        int64_t e = hal_wall_clock();
+        if (e <= 0) { snprintf(value, n, "%s", "not set >"); break; }
+        int64_t local = e + (int64_t)prefs_tz_offset_min() * 60;
+        int64_t days = local / 86400; int rem = (int)(local - days * 86400);
+        if (rem < 0) { rem += 86400; days--; }
+        int yy, mm, dd; civil_from_days(days, &yy, &mm, &dd);
+        static const char *MON[] = { "Jan","Feb","Mar","Apr","May","Jun",
+                                     "Jul","Aug","Sep","Oct","Nov","Dec" };
+        snprintf(value, n, "%s %d %02d:%02d >", MON[(mm - 1) % 12], dd,
+                 rem / 3600, (rem % 3600) / 60);
+        } break;
+    case S_WIFI:    snprintf(label, n, "Wi-Fi setup");
+        snprintf(value, n, "%s", hal_wifi_have_creds() ? "Re-scan >" : "Scan QR >"); break;
+    case S_PUSH:    snprintf(label, n, "Wi-Fi push (local)");
+        snprintf(value, n, "%s", "Wi-Fi >"); break;
+    case S_UPDATE:  snprintf(label, n, "Update firmware");
+        snprintf(value, n, "%s", hal_ota_update_available() ? "Available >" : "Wi-Fi >"); break;
     }
 }
 
@@ -232,7 +392,7 @@ static void render_ota(Canvas *c)
     char line[80];
     if (active) snprintf(line, sizeof line, "%s%.*s", base, (int)((t / 400) % 4), "...");
     else        snprintf(line, sizeof line, "%s", base);
-    font_draw_string_centered(c, 262, &font_small, line, ph == OTA_FAIL ? COLOR_RED : THEME_TITLE);
+    ui_text_centered(c, 262, &ui_font_body, line, ph == OTA_FAIL ? COLOR_RED : THEME_TITLE);
 
     if (active)
         ota_scanner(c, 60, 300, c->width - 120, 8, t, accent);
@@ -240,15 +400,66 @@ static void render_ota(Canvas *c)
     // Fallback: a same-network push (tools/ota-push.sh or a browser) while Wi-Fi is up.
     const char *url = hal_ota_url();
     if (url && ph != OTA_DONE) {
-        font_draw_string_centered(c, 372, &font_tiny, "or push from a PC to", THEME_DIM);
-        font_draw_string_centered(c, 394, &font_tiny, url, THEME_LABEL);
+        ui_text_centered(c, 372, &ui_font_cap, "or push from a PC to", THEME_DIM);
+        ui_text_centered(c, 394, &ui_font_cap, url, THEME_LABEL);
     }
     theme_hint(c, ph == OTA_DONE ? "rebooting..." : "BACK cancel");
 }
 
+// --- Location picker overlay: a scrolling city list ------------------------
+static void render_city(Canvas *c)
+{
+    theme_clear(c);
+    theme_header(c, "Location", THEME_TITLE, NULL, THEME_DIM);
+
+    const int top = 50, rowh = 30, visible = 11;   // rows that fit above the hint
+    int first = s_city_sel - visible / 2;
+    if (first < 0) first = 0;
+    if (first > N_CITIES - visible) first = N_CITIES - visible;
+    if (first < 0) first = 0;
+
+    int y = top;
+    for (int i = first; i < N_CITIES && i < first + visible; i++) {
+        char val[16];
+        int off = CITIES[i].tz;
+        snprintf(val, sizeof val, "UTC%+d:%02d", off / 60, (off < 0 ? -off : off) % 60);
+        theme_row(c, y, CITIES[i].name, val, i == s_city_sel, false);
+        y += rowh;
+    }
+    theme_hint(c, "UP/DN pick   OK set   BACK cancel");
+}
+
+// --- Manual clock editor overlay -------------------------------------------
+static void render_clock(Canvas *c)
+{
+    theme_clear(c);
+    theme_header(c, "Set clock", THEME_TITLE, NULL, THEME_DIM);
+
+    static const char *MON[] = { "Jan","Feb","Mar","Apr","May","Jun",
+                                 "Jul","Aug","Sep","Oct","Nov","Dec" };
+    char vals[5][8];
+    snprintf(vals[0], 8, "%d",   s_clk[0]);
+    snprintf(vals[1], 8, "%s",   MON[(s_clk[1] - 1) % 12]);
+    snprintf(vals[2], 8, "%d",   s_clk[2]);
+    snprintf(vals[3], 8, "%02d", s_clk[3]);
+    snprintf(vals[4], 8, "%02d", s_clk[4]);
+    static const char *LBL[5] = { "Year", "Month", "Day", "Hour", "Minute" };
+
+    int y = 70;
+    for (int i = 0; i < 5; i++) {
+        theme_row(c, y, LBL[i], vals[i], i == s_clk_f, false);
+        y += 34;
+    }
+    ui_text_centered(c, y + 6, &ui_font_cap,
+                              "enter your LOCAL time", THEME_DIM);
+    theme_hint(c, "UP/DN field   ENC/<> change   OK set   BACK cancel");
+}
+
 static void on_render(Canvas *c)
 {
-    if (s_ota) { render_ota(c); return; }
+    if (s_mode == MODE_OTA)   { render_ota(c);   return; }
+    if (s_mode == MODE_CITY)  { render_city(c);  return; }
+    if (s_mode == MODE_CLOCK) { render_clock(c); return; }
 
     theme_clear(c);
     theme_header(c, "Settings", THEME_TITLE, NULL, THEME_DIM);
@@ -268,8 +479,46 @@ static void on_leave(void) { prefs_save(); }
 
 static void on_input(InputEvent e)
 {
-    if (s_ota) {   // overlay: only BACK closes it (Wi-Fi keeps serving until reboot)
-        if (e.type == INPUT_BTN_BACK || e.type == INPUT_BTN_MENU) s_ota = false;
+    if (s_mode == MODE_OTA) {   // overlay: only BACK closes it (Wi-Fi serves until reboot)
+        if (e.type == INPUT_BTN_BACK || e.type == INPUT_BTN_MENU) s_mode = MODE_MAIN;
+        return;
+    }
+
+    if (s_mode == MODE_CITY) {
+        switch (e.type) {
+        case INPUT_NAV_UP:
+        case INPUT_ENC_CCW:  if (s_city_sel > 0)            { s_city_sel--; hal_audio_click(false); } break;
+        case INPUT_NAV_DOWN:
+        case INPUT_ENC_CW:   if (s_city_sel < N_CITIES - 1) { s_city_sel++; hal_audio_click(false); } break;
+        case INPUT_NAV_SELECT:
+        case INPUT_ENC_PUSH: {
+            const City *ct = &CITIES[s_city_sel];
+            g_prefs.lat = ct->lat; g_prefs.lng = ct->lng; g_prefs.tz_std_min = ct->tz;
+            hal_audio_click(true);
+            s_mode = MODE_MAIN;
+            break;
+        }
+        case INPUT_BTN_BACK:
+        case INPUT_BTN_MENU: s_mode = MODE_MAIN; break;
+        default: break;
+        }
+        return;
+    }
+
+    if (s_mode == MODE_CLOCK) {
+        switch (e.type) {
+        case INPUT_NAV_UP:    s_clk_f = (s_clk_f + 4) % 5; hal_audio_click(false); break;
+        case INPUT_NAV_DOWN:  s_clk_f = (s_clk_f + 1) % 5; hal_audio_click(false); break;
+        case INPUT_NAV_RIGHT:
+        case INPUT_ENC_CW:    clock_editor_adjust(+1); hal_audio_click(false); break;
+        case INPUT_NAV_LEFT:
+        case INPUT_ENC_CCW:   clock_editor_adjust(-1); hal_audio_click(false); break;
+        case INPUT_NAV_SELECT:
+        case INPUT_ENC_PUSH:  clock_editor_apply(); hal_audio_click(true); s_mode = MODE_MAIN; break;
+        case INPUT_BTN_BACK:
+        case INPUT_BTN_MENU:  s_mode = MODE_MAIN; break;
+        default: break;
+        }
         return;
     }
 
@@ -277,14 +526,18 @@ static void on_input(InputEvent e)
     case INPUT_NAV_UP:   s_sel = (s_sel + S_COUNT - 1) % S_COUNT; break;
     case INPUT_NAV_DOWN: s_sel = (s_sel + 1) % S_COUNT; break;
     case INPUT_ENC_CW:
-    case INPUT_NAV_RIGHT: if (s_sel != S_UPDATE) adjust(+1); break;
+    case INPUT_NAV_RIGHT: if (s_sel != S_UPDATE && s_sel != S_PUSH && s_sel != S_WIFI && s_sel != S_LOCATION && s_sel != S_SETCLOCK) adjust(+1); break;
     case INPUT_ENC_CCW:
-    case INPUT_NAV_LEFT:  if (s_sel != S_UPDATE) adjust(-1); break;
+    case INPUT_NAV_LEFT:  if (s_sel != S_UPDATE && s_sel != S_PUSH && s_sel != S_WIFI && s_sel != S_LOCATION && s_sel != S_SETCLOCK) adjust(-1); break;
     case INPUT_NAV_SELECT:
     case INPUT_ENC_PUSH:
-        if (s_sel == S_UPDATE)      { s_ota = true; hal_ota_pull(); }    // check GitHub + self-flash
-        else if (s_sel == S_TAJWEED || s_sel == S_OUTPUT) adjust(0);     // toggle
-        else s_sel = (s_sel + 1) % S_COUNT;                             // advance
+        if (s_sel == S_UPDATE)        { s_mode = MODE_OTA; hal_ota_pull(); }   // check GitHub + self-flash
+        else if (s_sel == S_WIFI)     { prefs_save(); scene_set_return(SCENE_SETTINGS); scene_switch(SCENE_WIFI_SETUP); }
+        else if (s_sel == S_PUSH)     { s_mode = MODE_OTA; hal_ota_start(); }  // Wi-Fi + local /update server, NO GitHub pull
+        else if (s_sel == S_LOCATION) { s_city_sel = nearest_city(); s_mode = MODE_CITY; }
+        else if (s_sel == S_SETCLOCK) { clock_editor_open(); s_mode = MODE_CLOCK; }
+        else if (s_sel == S_TAJWEED || s_sel == S_OUTPUT || s_sel == S_DST) adjust(0);  // toggle
+        else s_sel = (s_sel + 1) % S_COUNT;                                    // advance
         break;
     case INPUT_BTN_BACK:
     case INPUT_BTN_MENU:
